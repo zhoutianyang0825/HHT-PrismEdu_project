@@ -1,0 +1,43 @@
+[project]
+name = "hht-prismedu"
+version = "0.1.0"
+description = "HHT棱镜课堂：以 BKT 掌握度为状态中枢的三端学情闭环 Agent 系统"
+requires-python = ">=3.11,<3.13"
+
+dependencies = [
+    # ---- Agent 框架层 ----
+    "langchain>=1.0",                        # LLM 统一接入 / Prompt / RAG / tool 定义
+    "langgraph>=1.0",                        # 三端 Agent 状态机主干（StateGraph + interrupt）
+    "langgraph-checkpoint-postgres>=2.0",    # PostgresSaver：挂起会话与业务表同库
+    "crewai>=0.86",                          # 教研端两套 crew（analysis_crew / exam_crew）
+
+    # ---- 服务层 ----
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+
+    # ---- 数据层 ----
+    "psycopg[binary]>=3.2",                  # PostgreSQL 16 驱动（业务表 + checkpointer 同库）
+    "alembic>=1.13",                         # 迁移管理，从第一张表开始
+    "neo4j>=5.26",                           # 知识点图谱
+    "pymilvus>=2.4",                         # Milvus standalone 客户端
+    "langchain-milvus>=0.1",                 # LangChain Milvus Retriever 集成
+
+    # ---- 前端与统计 ----
+    "streamlit>=1.38",
+    "plotly>=5.24",
+    "pandas>=2.2",
+
+    # ---- 基础工具 ----
+    "pydantic-settings>=2.4",                # .env 配置加载
+    "httpx>=0.27",                           # LLM 连通性探测 / 异步 HTTP
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.uv]
+# 纯应用项目，不做包构建：uv run 直接以项目根为工作目录执行
+package = false

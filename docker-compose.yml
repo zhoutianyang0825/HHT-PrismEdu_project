@@ -1,0 +1,68 @@
+# HHT-PrismEdu 三容器编排：PostgreSQL 16 + Neo4j 5.26 + Milvus standalone
+# 用法：docker compose up -d   （Milvus 首启要等 30~60 秒才监听 19530）
+# 注意：宿主机端口若被占用（如 OrbStack 里已有 Milvus 映射了 19530），
+#       把 "19530:19530" 改成 "19531:19530"，同时 .env 里 MILVUS_URI 改 19531。
+
+services:
+
+  # ---------- 业务数据 + LangGraph 挂起会话（一库两用） ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: prismedu-postgres
+    environment:
+      POSTGRES_USER: prismedu
+      POSTGRES_PASSWORD: prismedu_dev_2026
+      POSTGRES_DB: prismedu
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:                       # pg_isready：PG 自带的就绪探测命令
+      test: ["CMD-SHELL", "pg_isready -U prismedu -d prismedu"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------- 知识点图谱 ----------
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: prismedu-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/prismedu neo4j 2026     # 密码含空格，连接串里原样传
+    ports:
+      - "7474:7474"                    # HTTP 管理界面（浏览器可视化图谱）
+      - "7687:7687"                    # Bolt 协议（Python driver 用这个）
+    volumes:
+      - neo4j_data:/data
+    healthcheck:                       # cypher-shell 真正执行一条 Cypher，比端口探测可靠
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p 'prismedu neo4j 2026' 'RETURN 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------- 向量检索（单容器：内嵌 etcd + 本地存储，无需另起 etcd/minio） ----------
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: prismedu-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"                        # 使用内嵌 etcd，不单起服务
+      ETCD_DATA_DIR: /var/lib/milvus/embedded_etcd
+      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
+      COMMON_STORAGETYPE: local                     # 元数据/对象存储用本地盘
+    ports:
+      - "19530:19530"                  # gRPC（pymilvus 连这个）
+      - "9091:9091"                    # 健康检查指标口
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:                       # /healthz 返回 200 即内部 etcd 已就绪
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s                # 首启缓冲：etcd 就绪前探测失败不计入重试
+
+volumes:
+  pg_data:
+  neo4j_data:
+  milvus_data:

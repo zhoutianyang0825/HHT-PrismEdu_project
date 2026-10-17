@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+
+# 环境与密钥
+.env
+
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+
+# 数据与模型产物（seed 源文件保留，生成产物不入库）
+data/generated/
+*.log
+demo.mp4

@@ -1,0 +1,10 @@
+# embedEtcd.yaml —— Milvus 内嵌 etcd 的最小配置
+# 作用：milvusdb/milvus 镜像不自带这个文件，但容器环境变量
+#       ETCD_CONFIG_PATH 指向 /milvus/configs/embedEtcd.yaml，
+#       缺了它内嵌 etcd 拿到 nil 配置会直接 panic（etcd_server.go:49）。
+#       所以由 docker-compose.yml 挂载进容器，内容只需两行核心配置。
+etcd:
+  use:
+    embed: true                          # 开启内嵌模式，不单独起 etcd 容器
+  data:
+    dir: /var/lib/milvus/embedded_etcd   # etcd 数据落盘位置（在 milvus_data 卷内）

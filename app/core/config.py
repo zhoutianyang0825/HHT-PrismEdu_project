@@ -34,15 +34,27 @@ class Settings(BaseSettings):
 
     # ---- Milvus 向量库 ----
     milvus_uri: str = "http://localhost:19530"
+    # 双 collection 物理隔离（PRD C-02）：教材三端可见，题库仅教师/教研/管理员
+    collection_textbook: str = "textbook_math"
+    collection_question: str = "question_bank"
 
     # ---- LLM（DashScope 兼容 OpenAI 接口）----
-    llm_base_url: str = "http://127.0.0.1:60859/dashscope/compatible-mode/v1"
+    llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_api_key: str = ""                          # 必填项，留空则自检报 FAIL
     llm_model: str = "deepseek-v4-flash"
 
     # ---- Embedding（M1 入库用，先占位）----
     embed_model: str = "text-embedding-v3"
     embed_dim: int = 1024                          # ★ 必须与 text-embedding-v3 输出维度一致，建 collection 时用
+    dashscope_api_key: str = ""                    # embedding 直连百炼用；留空则代码里兜底用 llm_api_key（同一把 DashScope key）
+
+    # ---- JWT / 登录安全（M1-T2）----
+    secret_key: str = "change-me-in-prod"          # 生产必须换；demo 用
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 720         # 一周版不发 refresh token，12h 长令牌
+    password_min_length: int = 8                   # 密码强度策略：最短 8 位且必须含字母+数字
+    login_max_failures: int = 5                    # 连续失败 5 次
+    lockout_minutes: int = 15                      # 锁定 15 分钟
 
 
     # ★ model_config 是 pydantic v2 的配置入口（v1 的 class Config 写法已废弃）：
@@ -67,6 +79,18 @@ class Settings(BaseSettings):
         """
         return (
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @property
+    def database_url(self) -> str:
+        """SQLAlchemy / Alembic 专用连接串：postgresql+psycopg://...
+
+        为啥不是直接用 postgres_dsn：SQLAlchemy 的 postgresql:// 默认找 psycopg2 驱动，
+        本项目装的是 psycopg 3，必须显式写成 postgresql+psycopg:// 才会走对驱动。
+        """
+        return (
+            f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 

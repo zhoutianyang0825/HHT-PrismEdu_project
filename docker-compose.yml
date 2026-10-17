@@ -55,6 +55,8 @@ services:
       - "9091:9091"                    # 健康检查指标口
     volumes:
       - milvus_data:/var/lib/milvus
+      # 镜像里不自带 embedEtcd.yaml，必须手动挂进去，否则内嵌 etcd 启动即 panic
+      - ./embedEtcd.yaml:/milvus/configs/embedEtcd.yaml
     healthcheck:                       # /healthz 返回 200 即内部 etcd 已就绪
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 15s

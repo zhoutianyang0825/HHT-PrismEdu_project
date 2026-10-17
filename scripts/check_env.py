@@ -100,14 +100,14 @@ def check_llm() -> bool:
         #   下游只会看到"choices 为空"，看不出真实原因是鉴权失败
         resp.raise_for_status()        # 非 2xx 直接抛异常，进 except 分支
         data = resp.json()
-        # 得到的数据：choices 列表；能取到 content 说明整条链路（代理->百炼->模型）全通
+        # 得到的数据：choices 列表；能取到 content 说明整条链路（官方 API -> 模型）全通
         has_content = bool(data.get("choices"))
         print(f"[OK] LLM API      {settings.llm_base_url}  model={settings.llm_model}  ->  {'通' if has_content else '响应异常'}")
         return has_content
     
     except Exception as e:
         print(f"[FAIL] LLM API  {e.__class__.__name__}: {e}")
-        print("       排查：本地代理(127.0.0.1:60859)是否开着？base_url 是否以 /compatible-mode/v1 结尾？")
+        print("       排查：LLM_API_KEY 是否为 DeepSeek 官方 key？base_url 应为 https://api.deepseek.com（不带 /v1 也能通）？")
         return False
 
 

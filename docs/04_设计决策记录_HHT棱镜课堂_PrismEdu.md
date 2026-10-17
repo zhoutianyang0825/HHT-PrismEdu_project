@@ -1,0 +1,129 @@
+# 04 · 设计决策记录（ADR）— HHT 棱镜课堂 PrismEdu
+
+> **定位**：记录项目中"特意的设计"——每个决策写清三件事：**选了什么 / 为什么 / 放弃了什么**。
+> 代码只回答"是这么写的"，本文档回答"为什么不是那么写的"。
+> **维护规则（2026-10-17 老大定稿）**：**问答驱动，不批量预填**——老大逐文件审阅代码，提出"为啥做成 A、相比 B 有何利弊"这类问题，解答后当轮记录进本文档；推翻旧决策时不删原文，在原条目下追加"❌ 已推翻（原因+日期）"。
+> **存量说明**：下方 M1 的 D1~D16 是生成代码时的预填底账，老大审阅时可逐条挑战——答不上来或答错的，修订；老大推翻的，标注已推翻。
+
+---
+
+## M1 · 数据与权限基座（2026-10）
+
+### D1 · 权限采用"双通道 scope"，detail 与 aggregate 永不融合
+
+- **背景**：教研员做学情分析需要年级粒度聚合数据，但**不能**接触任何学生明细（隐私红线，PRD C-02）。
+- **决策**：`build_scopes()` 返回的 scope 列表按 `type` 分为 `detail` / `aggregate` / `self` 三种，**两条通道独立返回、互不展开**；接口侧另有守卫 `require_detail_channel` / `require_aggregate_channel`，researcher 调明细接口直接 403。
+- **为什么不融合**：若把两通道合并成"一个大权限对象"，任何一处过滤逻辑写歪（比如把 aggregate 的年级范围误用到明细查询上），隐私就漏了。**类型隔离 = 隔离的第一性保证**，比"运行时仔细检查"可靠。
+- **放弃的备选**：单一 scope 对象 + 字段级开关（嵌套深、容易写歪）；纯装饰器校验（守卫逻辑散落，漏一个接口就是事故）。
+- **验收锚点**：单测 `test_researcher_detail_channel_403`（🔴 关键用例）。
+
+### D2 · 角色不放在 users 表上，用 user_roles 关联表展开
+
+- **背景**：一人可兼任多角色（如教师兼教研员），JWT 签发要拼 `roles: [...]` 数组。
+- **决策**：users 表不存 role；`user_roles` 表一行一个角色，`(user_id, role)` 复合唯一。
+- **为什么**：单列多值（逗号分隔）没法建索引没法约束；JSON 列没法复合唯一。关联表是关系数据库标准解，查询/约束/扩展（将来角色加有效期）都留了口。
+- **代价**：多一次 JOIN。可接受——登录频次远低于查询频次。
+
+### D3 · 角色值用 String + 应用层校验，不用 PG 枚举类型
+
+- **决策**：`role: Mapped[str]`，合法值由应用层 `VALID_ROLES` 集合把关（JWT 签发时校验）。
+- **为什么**：PG 的 `ENUM` 加一个角色要 `ALTER TYPE`，在 SQLite（单测库）上行为还不一致；String + 应用层校验跨库可移植，加角色只需改一处常量。
+- **取舍**：数据库层失去枚举兜底，脏值理论上可入库——靠签发端校验 + 测试覆盖弥补。
+
+### D4 · 级联删除配两层：relationship 的 cascade + ForeignKey 的 ondelete
+
+- **决策**：删 User 时其 UserRole/Student 行同步删除——Python 侧 `cascade="all, delete-orphan"`，数据库侧 `ondelete="CASCADE"`。
+- **为什么**：两层是不同世界的行为——cascade 只在走 SQLAlchemy 的 `session.delete()` 时生效；ondelete 在**任何**途径删父行时生效（包括 psql 手删）。只配一层总有绕过的路径，双保险才稳。
+- **额外动机**：SQLite（单测库）对 ondelete 支持不完整，Python 侧 cascade 保证单测里级联也正确。
+
+### D5 · 软删除用户：is_active=False，不物理删行
+
+- **背景**：学生毕业/教师离职后，其历史作答数据仍要参与统计与模型训练。
+- **决策**：User 停用只置 `is_active=False`（登录被拒），数据行保留。
+- **放弃的备选**：物理删除 + 归档表（M1 阶段过度设计，等数据量大了再评估）。
+
+### D6 · 模型层用 SQLAlchemy 2.0 声明式写法（Mapped / mapped_column）
+
+- **决策**：全部 20 张表用 2.0 写法；类型注解直接当建表信息（`str | None` → 可空列）。
+- **为什么**：注解 = 建表类型 + 读出类型 + IDE 提示，一式三用；与 FastAPI/Pydantic 的类型风格一致。
+- **为什么不直接写 .sql 脚本**：① 同一份模型在 PG（生产）与 SQLite（单测内存库）上自动切换方言，单测不依赖 Docker；② Alembic 在 M3+ 对"模型 vs 库结构"自动 diff 生成迁移；③ 查询结果是带类型的对象；④ 参数化自动防注入。代价是学习成本前置（复杂分析 SQL 仍降级 `text()` 直写）。
+
+### D7 · Base 登记制：所有模型必须 import 同一个 Base
+
+- **决策**：`class Base(DeclarativeBase)` 是唯一登记处；`app/models/__init__.py` 把全部模型文件串起来 import。
+- **为什么**：`Base.metadata` 是建表与迁移的唯一数据源，漏 import 的模型是"幽灵表"——create_all 和 Alembic 都看不见它。
+- **由此产生的约定**：新增模型文件**必须**同步加进 `__init__.py`（checklist 项）。
+
+### D8 · Alembic 首版迁移用 create_all 策略 + 空库校验
+
+- **决策**：0001_initial 不手写 20 张表的 DDL，直接 `Base.metadata.create_all()`；执行前检查库中已存在业务表则报错拒绝。
+- **为什么**：首版"模型即迁移"，零漂移风险；手写 20 张表 DDL 必然与模型有出入。空库校验防止 create_all 在旧库上"半途合并"出四不像结构。
+- **边界**：从 0002 起改用 autogenerate diff，手写只做微调。
+
+### D9 · engine 惰性单例：import 零副作用
+
+- **决策**：`session.py` 不在 import 时建 engine，用 `@lru_cache` 的 `get_engine()` 惰性创建；模块级 `SessionLocal` 通过 `__getattr__` 惰性解析。
+- **为什么**：import 即连库（副作用）会让"跑个单测也要装 psycopg、连不上就崩"。惰性化后：导入任何模块都安全，连不上只在真正用库那一刻报错。
+- **教训来源**：M1 review 阶段单测因 import 副作用被迫装驱动，当场改掉。
+
+### D10 · 单测用 SQLite 内存库替代真 PG
+
+- **决策**：conftest 用 `sqlite:///:memory:`，每测一建、用完即弃。
+- **前提**：模型全部使用跨库可移植类型（JSON 列在 PG 上是 JSONB、SQLite 上是 TEXT，双兼容）。
+- **边界**：PG 专有特性（JSONB 索引、ondelete 细节）单测盖不住，由 seed 脚本实跑（容器环境）补充验证。
+
+### D11 · 密码哈希直用 bcrypt 库，不用 passlib
+
+- **决策**：`bcrypt.hashpw/checkpw` + 5 次失败锁定（进程内计数）。
+- **为什么**：passlib 1.7.4 已停更且与 bcrypt 5.x 不兼容（`__about__` 被移除，产生告警），2026 年新项目没有理由再引入这层过时包装。
+- **已知边界**：失败锁定计数在进程内存里，多 worker 部署时各自计数——单机演示够用，生产换 Redis 计数器（M5 待办）。
+
+### D12 · 题库正确性：答案公式现算 + 断言自校验，不手抄
+
+- **决策**：`tools/gen_question_bank.py` 所有数值题答案由公式现算，出题参数用 assert 代回验证（Δ 完全平方、扇形面积代回、根代回方程），任一断言炸掉就拒绝生成 CSV。
+- **为什么**：手抄答案必错（M1 开发中真实发生过：`(2,-5,2)` 的根 0.5 被 `//` 截断成 0，被断言逮住）。**数据正确性靠生成时保证，不靠人工核对**。
+- **原则沉淀**：凡能计算的绝手写，凡能断言的必断言。
+
+### D13 · 跨库写入顺序：PG 先、Milvus 后
+
+- **决策**：seed_question_bank 先在 PG 一个事务写完（chapters/KPs/questions），commit 成功后才向 Milvus 灌向量。
+- **为什么**：PG 是事实源（source of truth），事务回滚干净；Milvus 数据可从 PG 全量再生，失败删了重灌即可。反过来（Milvus 先写）会产生"向量库有、事实库无"的孤儿数据，排查困难。
+
+### D14 · Milvus 向量切片 id 带源文件指纹
+
+- **决策**：教材切片 id = `tb_{文件名md5前8位}_{序号}`，而非纯序号。
+- **为什么**：序号每次调用从 0 数起，灌第二个 PDF 必然撞主键；Milvus 允许重复主键不报错，后果是检索出重复结果——静默的数据污染。加指纹后天然全局唯一。
+- **教训来源**：M1 review 阶段发现，当场修掉。
+
+### D15 · RAG 检索结果强制带溯源（source）
+
+- **决策**：两个 collection 的每条记录都存 `source`（文件名+页码 / 题号），retriever 返回的每条 hit 必带。
+- **为什么**：PRD C-02 验收硬指标"答案可溯源"；且题库数据对学生物理不可见，教师侧检索需要连解析一起呈现。
+- **对应约束**：`output_fields` 按 collection 分别指定（Milvus 对 schema 外字段直接报错），不搞通用大而全列表。
+
+### D16 · Embedding 维度单一事实源：config.embed_dim
+
+- **决策**：`embed_dim=1024` 只在 config 定义一次；collection 建库、ingest 校验都引用它。
+- **为什么**：模型换了维度变了，若两处写死必有一处忘改——Milvus 建库维度不匹配的报错发生在灌数时，离案发现场很远，排查成本高。
+
+---
+
+### D17 · 时间戳列用 server_default，业务默认值用 default（2026-10-18 老大审 user.py 时问出）
+
+- **问答原点**：老大审 `user.py` 问"default vs server_default 的区别是啥"。
+- **决策**：`created_at` 等时间戳列一律 `server_default=func.now()`（数据库侧填值，写进 DDL 的 DEFAULT 子句）；`is_active=True` 这类业务默认值用 `default=`（SQLAlchemy 插入时填）。
+- **为什么**：server_default 对**任何**插值途径生效（psql 手插、别的语言、运维脚本）；default 只在走 SQLAlchemy 时生效，手插行会得到 NULL。时间戳的完整性要求"谁插都有"，交给数据库最稳。
+- **代价/边界**：server_default 的值只能是数据库能算的（now()、常量），做不了"根据 Python 配置动态定"——这类需求回退到 default。
+
+---
+
+## M2+ · （待里程碑结束时追加）
+
+<!-- 追加模板：
+### Dxx · 标题
+- **背景**：
+- **决策**：
+- **为什么**：
+- **放弃的备选**：
+- **代价/边界**：
+-->

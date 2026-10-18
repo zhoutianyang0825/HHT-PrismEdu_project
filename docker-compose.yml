@@ -23,6 +23,7 @@ services:
       timeout: 3s
       retries: 10
 
+
   # ---------- 知识点图谱 ----------
   neo4j:
     image: neo4j:5.26-community
@@ -39,6 +40,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+
 
   # ---------- 向量检索（单容器：内嵌 etcd + 本地存储，无需另起 etcd/minio） ----------
   milvus:
@@ -63,6 +65,21 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s                # 首启缓冲：etcd 就绪前探测失败不计入重试
+
+
+  # ---------- Milvus 图形化管理界面 ----------
+  attu:
+    image: zilliz/attu:v2.4              # 版本要跟 Milvus 2.4.15 对齐
+    container_name: prismedu-attu
+    environment:
+      MILVUS_URL: prismedu-milvus:19530  # ★ 容器网络内直连服务名，别写 localhost
+    ports:
+      - "8000:3000"                      # attu 的 web 在容器内 3000，宿主机用 8000
+    depends_on:
+      milvus:
+        condition: service_healthy       # 等 Milvus 健康检查过了再起
+
+
 
 volumes:
   pg_data:

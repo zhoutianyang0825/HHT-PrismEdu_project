@@ -117,6 +117,35 @@
 
 ---
 
+### D18 · seed 的 --wipe 用 TRUNCATE CASCADE，不逐表 DELETE（2026-10-18 实跑踩坑）
+
+- **背景**：首次实跑 `seed_question_bank.py --wipe` 报 ForeignKeyViolation——库里已有上次灌的 185 题，且 student_answers 等子表有测试数据引用 questions。
+- **决策**：wipe 改为 `TRUNCATE questions, knowledge_points, chapters RESTART IDENTITY CASCADE`。
+- **为什么**：引用 questions/kps 的子表多达 6 张（student_answers/error_logs/bkt_state/diagnostic_quizzes/homework_questions/mastery_records），逐表 DELETE 既啰嗦又必漏；CASCADE 让 PG 沿 FK 依赖链自动截断，RESTART IDENTITY 顺便归零自增序列（重灌后 id 与 CSV 干净对齐）。
+- **放弃的备选**：给所有子表 FK 加 ondelete="CASCADE"——业务表级联删除是**业务语义**（学生删了作答要不要删？），不能为 seed 方便而放宽。
+
+### D19 · pymilvus 3.x 的 create_index 必须用 IndexParams 对象（2026-10-18 实跑踩坑）
+
+- **背景**：传 dict 报 `expected IndexParams, got dict`（项目装的是 pymilvus 3.0.2）。
+- **决策**：统一用 `client.prepare_index_params()` 造对象 + `add_index(field_name=...)` 填参。
+- **为什么**：pymilvus 3.x 收紧类型校验；网上大量教程是 2.x 的 dict 写法，照抄即炸。**升级依赖时 API 签名要重验，不能信记忆**。
+
+### D20 · Milvus collection 建库时必须 load，search 只认内存态（2026-10-18 实跑踩坑）
+
+- **背景**：insert + flush 完成后自检检索报 `collection not loaded`。
+- **决策**：`ensure_collections()` 里建完索引立即 `load_collection(name)`（幂等）。
+- **为什么**：Milvus 数据分"已落盘"与"已加载进内存"两态——insert/flush 只到前者，search 只认后者。这个两态模型是 Milvus 与 PG 最不同的心智差异。
+- **代价**：load 占内存（standalone 单机无所谓）；insert 不需要 load。
+
+### D21 · Embedding 双模式工厂 + key 与供应商绑死（2026-10-18 实跑踩坑）
+
+- **背景**：401 InvalidApiKey——.env 的 LLM_API_KEY 是 DeepSeek 官方 key（LLM_BASE_URL=deepseek），兜底逻辑却拿它调阿里百炼。
+- **决策**：① embeddings.py 改双模式：EMBED_MODEL 是本地路径 → HuggingFaceEmbeddings（sentence-transformers，MPS 加速）；是云端模型名 → DashScopeEmbeddings（需 DASHSCOPE_API_KEY）。② key 兜底注释明确警告：llm_api_key 只有真是百炼 key 才兜得动。
+- **为什么**：本地 BGE-M3 免 key 免网络（Mac M4 跑 185 题向量化约 3 分钟），且与云端 text-embedding-v3 恰好同为 1024 维——collection 建库参数零改动。
+- **原则沉淀**：**key 不是通用密码，是供应商绑定凭证**——base_url 指向谁，key 就必须是谁家的。
+
+---
+
 ## M2+ · （待里程碑结束时追加）
 
 <!-- 追加模板：

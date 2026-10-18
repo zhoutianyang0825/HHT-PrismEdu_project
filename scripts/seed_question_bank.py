@@ -1,8 +1,8 @@
 """M1-T4 · 题库 seed 脚本：题库 CSV → PG（事务）+ Milvus 双写；顺带灌章节/知识点表。
 
  完成判据对应：
-   uv run python scripts/seed_question_bank.py        # 185 题 -> PG + Milvus
-   uv run python scripts/seed_question_bank.py --wipe # PG 清空重灌 + 重建两个 collection
+   uv run python scripts/seed_question_bank.py         # 185 题 -> PG + Milvus
+   uv run python scripts/seed_question_bank.py --wipe  # PG 清空重灌 + 重建两个 collection
 
  事务纪律：
    ① 先 validate_question_rows 整体校验，有任何坏行 → 整批不写（M1-T6 单测钉住的行为）
@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sqlalchemy import text
 
 from pymilvus import MilvusClient
 
@@ -53,11 +55,18 @@ def main() -> None:
     session = SessionLocal()
     try:
         if wipe:
-            # 重建语义：PG 侧也清干净（questions 先删——它是纯事实数据，可由 CSV 再生）
-            n_del = session.query(Question).delete()
-            session.query(KnowledgePoint).delete()
-            session.query(Chapter).delete()
-            print(f"[wipe] PG 已清空旧题 {n_del} 道 + 章节知识点，全量重灌")
+            # 重建语义：按 FK 依赖链整库清平。
+            # ★ 坑（2026-10-18 实跑踩到）：只 DELETE questions/kps/chapters 会被
+            #   student_answers 等子表的 FK 拦住（ForeignKeyViolation）——引用 questions
+            #   的表还有 student_answers/error_logs/bkt_state/diagnostic_quizzes/
+            #   homework_questions/mastery_records 等，逐个 delete 既啰嗦又容易漏。
+            # TRUNCATE ... CASCADE：PG 自动把【引用这三张父表】的子表一并截断，
+            #   RESTART IDENTITY 顺便把自增序列归零（重灌后 id 从 1 开始，和 CSV 干净对齐）。
+            #   users/students 没被列进来也不引用它们，保留不动。
+            session.execute(text(
+                "TRUNCATE questions, knowledge_points, chapters RESTART IDENTITY CASCADE"
+            ))
+            print("[wipe] PG 已清平 questions/kps/chapters 及全部引用子表（CASCADE）")
         n_ch, n_kp = ingest_chapters_and_kps(session, GRAPH_JSON)
         n_q = ingest_questions(session, rows)
         session.commit()
@@ -69,8 +78,10 @@ def main() -> None:
     finally:
         session.close()
 
+
+
     # 3) Milvus 写入（PG 成功后才执行）
-    # 陌生类 MilvusClient：pymilvus 2.4 的官方客户端（连接 Milvus standalone）。
+    # 陌生类 MilvusClient：pymilvus 2.4 的官方客户端，连接 Milvus standalone。
     #   uri=http://localhost:19530 是 Milvus 的 gRPC 端口，不是网页端口
     client = MilvusClient(uri=settings.milvus_uri)
     if wipe:
@@ -89,22 +100,31 @@ def main() -> None:
     BATCH = 100
     for i in range(0, len(milvus_rows), BATCH):
         client.insert(settings.collection_question, milvus_rows[i:i + BATCH])
-    # 陌生函数 flush：强制把缓冲区里的数据落盘成"可见"状态——Milvus insert 是
-    #   先进缓冲，flush 前检索可能查不到刚插的数据；seed 结尾 flush 一次保证自检查得到
+
+
+    # 陌生函数 flush：强制把缓冲区里的数据落盘成"可见"状态，
+    # Milvus insert 是先进缓冲，flush 前检索可能查不到刚插的数据；
+    # seed 结尾 再flush 一次保证自检查得到
     client.flush(settings.collection_question)
     print(f"[OK] Milvus 写入完成：collection={settings.collection_question}，{len(milvus_rows)} 条")
 
+
+
     # 4) 自检：teacher 视角搜一条"判别式"，确认 expr 过滤与检索可用
     from app.rag.retriever import retrieve
+
     hits = retrieve(client, "如何判断一元二次方程根的情况", role="teacher", top_k=3)
     print(f"[自检] teacher 检索 top3：")
     for h in hits:
         print(f"   score={h.score:.3f} {h.source} | {h.text[:40]}...")
+
     student_hits = retrieve(client, "如何判断一元二次方程根的情况", role="student", top_k=3)
     from_collections = {h.collection for h in student_hits}
+
     if settings.collection_question in from_collections:
         print("[FAIL] student 检索到了题库 collection，权限过滤失效！")
         sys.exit(1)
+
     print("[自检] student 只能命中 textbook_math，题库对学生不可见 ✓")
 
 

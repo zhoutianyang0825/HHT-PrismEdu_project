@@ -29,6 +29,8 @@ dependencies = [
     "langchain-community>=0.4.2",
     "python-jose[cryptography]>=3.5.0",
     "bcrypt>=5.0.0",
+    "dashscope>=1.27.7",
+    "sentence-transformers>=6.1.0",
 ]
 
 [dependency-groups]

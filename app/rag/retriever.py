@@ -54,14 +54,14 @@ def retrieve(client: MilvusClient, query: str, role: str,
       difficulty  只对题库生效——S-10 按掌握度定档抽题时用
       role 传未知值 → 按最严的 student 处理（fail-closed：宁紧勿松）
     """
-    # embed_query(单条) vs embed_documents(批量)：Embeddings 接口的两个入口，
-    #   检索问题用前者、批量入库用后者。★ 铁律：query 和文档必须用同一个
-    #   embedding 模型向量化——不同模型出的向量不在一个空间里，余弦相似度无意义
+    # embed_query(单条) vs embed_documents(批量)：Embeddings 接口的两个入口，检索问题用前者、批量入库用后者。
+    # ★ 铁律：query 和文档必须用同一个向量模型
+    # 获取问题向量
     query_vector = get_embeddings().embed_query(query)
 
-    # 陌生点 dict.get(k, 默认值)：键不存在时返回默认值而不是 KeyError——
-    #   这里 role 传了个未知值就退化成 student 的最严 expr（fail-closed 设计）
+    #  role 传了个未知值就退化成 student 的最严 expr（fail-closed 设计）
     expr = ROLE_EXPR.get(role, ROLE_EXPR["student"])
+
     # kp_id / difficulty 是字符串等值过滤，值必须带双引号（Milvus expr 语法坑）
     extra = []
     if kp_id:
@@ -84,6 +84,7 @@ def retrieve(client: MilvusClient, query: str, role: str,
             # metric 必须和建索引时一致（都是 COSINE），不一致直接报错
             search_params={"metric_type": "COSINE"},
         )
+
         # 返回结构是两层嵌套：results[每条query][每条命中]，单 query 所以只有 results[0]
         for res in results:
             for r in res:
@@ -93,10 +94,12 @@ def retrieve(client: MilvusClient, query: str, role: str,
                     source=ent.get("source", ""),
                     collection=coll,
                     score=float(r["distance"]),   # COSINE 相似度分数，越大越像
+
                     # 字典推导式白名单过滤：entity 里可能有本库没有的空字段，只挑有用的装 meta
                     meta={k: v for k, v in ent.items()
                           if k in ("kp_id", "chapter_id", "page", "difficulty")},
                 ))
+                
     # 两个库的结果混在一个列表，按分数统一排序（key=lambda 取每项的 score 字段做排序键）
     hits.sort(key=lambda h: h.score, reverse=True)
     return hits[:top_k]

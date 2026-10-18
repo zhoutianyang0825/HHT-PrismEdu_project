@@ -82,12 +82,21 @@ def ensure_collections(client: MilvusClient) -> None:
         #   index_type=AUTOINDEX：Milvus 自动挑内部索引结构（standalone 默认推荐）；
         #   metric_type=COSINE：相似度算法用余弦夹角（两个向量方向越近分数越高，
         #   1.0=完全同向）。选 COSINE 是因为语义向量的"意思相近"就体现在方向上，
-        #   不在长度上。坑：这里的 metric 必须和检索时 search_params 的一致，不一致报错
-        client.create_index(
-            collection_name=name,
+        #   不在长度上。坑①：这里的 metric 必须和检索时 search_params 的一致，不一致报错
+        #   坑②（2026-10-18 实跑踩到）：pymilvus 3.x 的 create_index 不再收 dict，
+        #   必须用 client.prepare_index_params() 造 IndexParams 对象再 add_index
+        index_params = client.prepare_index_params()
+        index_params.add_index(
             field_name="embedding",
-            index_params={"index_type": "AUTOINDEX", "metric_type": "COSINE"},
+            index_type="AUTOINDEX",
+            metric_type="COSINE",
         )
+        client.create_index(collection_name=name, index_params=index_params)
+        # ★ load：Milvus 的数据分两态——"已落盘"（flush 后持久化）和"已加载进内存"。
+        #   search 只认后者！新建的 collection 默认未加载，直接检索报
+        #   "collection not loaded"（2026-10-18 实跑踩到）。load_collection 阻塞到加载完成。
+        #   insert 不需要 load（写路径直接落盘），所以只在建库时 load 一次即可
+        client.load_collection(name)
 
 
 def drop_collections(client: MilvusClient) -> None:

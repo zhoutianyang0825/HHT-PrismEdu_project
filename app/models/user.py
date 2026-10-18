@@ -30,19 +30,16 @@ class User(Base):
     # index=True：给这列建 B-tree 索引。查询 WHERE username=... 走索引
     #   （毫秒级），不建则全表扫描（数据多了秒级）。代价：每次 INSERT 多维护一份索引
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True, comment="登录名，如 R003")
+
     password_hash: Mapped[str] = mapped_column(String(128), comment="bcrypt 哈希，绝不存明文")
     name: Mapped[str] = mapped_column(String(64), comment="真实姓名")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="停用则为False，保留历史作答数据") # 停用/启用，类似软删除
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-    # relationship：SQLAlchemy 的"表间跳转"；
-    #   表示：user 对象身上挂一个 .roles 属性，访问时自动去 user_roles 表查
-
-    # back_populates="user"：指向双向声明的另一头 UserRole.user
-
-    # cascade="all, delete-orphan"：级联规则。删 User 时它名下的 UserRole 行自动跟着删
-    #  （配合下面的 ondelete="CASCADE"，Python 侧和数据库侧双保险）
+    # relationship：SQLAlchemy 的"表间跳转"；表示：user 对象身上挂一个 .roles属性，访问时自动去 user_roles 表查
+    #   back_populates="user"：指向双向声明的另一头 UserRole.user
+    #   cascade="all, delete-orphan"：级联规则。删 User 时它名下的 UserRole 行自动跟着删
     roles: Mapped[list["UserRole"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 

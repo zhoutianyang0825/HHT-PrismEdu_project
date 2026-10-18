@@ -1,11 +1,14 @@
 """首版迁移：创建全部 20 张业务表。
 
-首次：执行 alembic upgrade head，其实执行的是0001_xxx.py，0001_xxx.py没有用 alembic revision --autogenerate -m "init" 直接生成，而是手写upgrade() 和  downgrade()方法，用creat_all 直接读取metadata，一次性建20张表
+首次：
+    执行 uv run alembic upgrade head，其实执行的是0001_xxx.py，
+    0001_xxx.py没有用 uv run alembic revision --autogenerate -m "init" 直接生成，
+    而是手写 upgrade() 和  downgrade()方法，用creat_all 直接读取 Base.metadata，一次性建20张表。
 
 第二次及以后：
-    都用 alembic revision --autogenerate -m "..." 对比metadata vs 库现状，生成迁移脚本；
+    都用 uv run alembic revision --autogenerate -m "..." 对比metadata vs 库现状，生成迁移脚本；
     然后人工过目生成的脚本；
-    脚本确认ok后，执行 alembic upgrade head，库即可追平 metadata
+    脚本确认ok后，执行 uv run alembic upgrade head，库即可追平 metadata
     
 """
 

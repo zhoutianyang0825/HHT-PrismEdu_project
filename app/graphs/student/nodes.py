@@ -189,9 +189,10 @@ def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
       - interrupt() 必须是节点函数体内的"直接调用"，包进子函数/try 会失效
       - 挂起状态靠 checkpointer 存（PostgresSaver 同库持久，重启不丢）
       - 恢复只能靠 Command(resume=...)，resume 的值就是 interrupt() 的返回值
+      - 为了保证"重启后会话还能 resume"，只能从新再走一遍函数（重放），
+        执行到interrupt（payload）时，langgraph检测内部的队列中是否有待消费的 resume 值，如果有，返回给interrupt，并消费resume值，剩余代码执行完毕
 
-    陌生参数 store：LangGraph 自动注入的长期记忆（InMemoryStore），
-    函数签名里声明了同名参数就会被注入——前提是 compile(store=...) 传了。
+    陌生参数 store：LangGraph 自动注入的长期记忆（InMemoryStore），图compile(store=...) 指定。
     """
     from app.services.student_profile import warm_start
 
@@ -225,7 +226,8 @@ def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
     ])
 
 
-    # ---- interrupt：图在此挂起，CLI/前端打印 hint 后，调 Command(resume=...) ----
+    # interrupt 所在节点函数 要"薄"，只放无副作用的代码（LLM 调用、只读查询可以；insert、发通知不行）
+    # ---- interrupt（payload）：图在此挂起，CLI/前端打印 hint 后，调 Command(resume=...) ----
     student_reply = interrupt({               # 函数停止执行，图停在原地
         "type": "scaffold_hint",              # 前端按 type 弹输入框（M5 SSE 约定）
         "hint": hint.content,

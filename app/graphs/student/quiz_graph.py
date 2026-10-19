@@ -1,4 +1,4 @@
-"""M2-T3 · S-10 诊断测验生成子图（架构文档 4.3，独立 StateGraph）。
+"""M2-T3 · S-10  子图：诊断测验题生成，独立 StateGraph。
 
 四步算法（PRD 5.4）：
   fetch_error_kps        近 30 天 error_logs → 去重得错题知识点集合 E + 频次
@@ -7,8 +7,9 @@
   select_quiz_questions  调组卷引擎逐点配题，总量 8、单点 ≤2（纯规则，不调 LLM）
   persist_quiz           写 diagnostic_quizzes 表（target_points_json 可解释性留痕）
 
-为什么独立子图：主图是"单轮单题+多轮引导"，测验是"一次生成一批题"的批处理，
-attempt_count / messages 语义完全不同，通过 question_ids 交接最干净。
+为什么独立子图：
+    主图是"单轮单题+多轮引导"，子图生成测验是 "一次生成一批题"的批处理，
+    attempt_count / messages 语义完全不同，通过 question_ids 交接最干净。
 """
 from collections import Counter
 from datetime import timedelta
@@ -39,15 +40,19 @@ def rank_targets(
       error_kp_ids = ["kp_crossmult", "kp_peifang"]      # E ∪ 前置外扩后的候选集
       error_freq   = {"kp_crossmult": 3}                 # 每点近 N 天错几次
       p_known_map  = {"kp_crossmult": 0.33, "kp_peifang": 0.52}
+
     要做的操作：排序（p_known 升序 → 错题频次降序 → 名字稳定排序）→ 截 Top5
       "同掌握度时按错题频次降序"——保证"又弱又常错"的优先
+
     返回：[{"kp_id", "p_known", "reason"}, ...]；reason 是给学生的可解释文案
     """
     ranked = sorted(
         error_kp_ids,
-        key=lambda kp: (p_known_map.get(kp, BKT_DEFAULT_P),
-                        -error_freq.get(kp, 0),
-                        kp),
+        # key 返回元组 = 多级排序
+        key=lambda kp: (0 if error_freq.get(kp, 0) > 0 else 1,  # 第0键：错题点永远优先
+                        p_known_map.get(kp, 0.5),       # 第1键：掌握度升序（最弱优先）
+                        -error_freq.get(kp, 0),         # 第2键：频次升序（用负号反转成降序，频次多的排前面）
+                        kp),       # 第3键：字典序（保证稳定可复现），掌握度和频次都一样的两个知识点，按字典序排
     )[:top_n]
 
     targets = []
@@ -55,11 +60,13 @@ def rank_targets(
         freq = error_freq.get(kp, 0)
         reason = (f"近30天连错{freq}次" if freq > 0
                   else "前置薄弱点（错题的先修知识）")
+        
         targets.append({
             "kp_id": kp,
             "p_known": p_known_map.get(kp, BKT_DEFAULT_P),
             "reason": reason,
         })
+
     return targets
 
 
@@ -67,10 +74,11 @@ def rank_targets(
 # 图节点（含 DB / Neo4j 访问，M4 建 tool 层后收口搬走）
 # =====================================================================
 def fetch_error_kps(state: QuizState) -> dict:
-    """Step 1 · 近 N 天错题 → 错题知识点集合 E + 频次。
+    """Step 1 · 近 N 天错题 → 错题知识点集合 E + 每个点错了的频次。
 
-    三表联查路径：error_logs(错因) ← student_answers(作答) → questions(kp_id)
-    只统计 is_correct == False 的作答——对的不叫错题。
+    三表联查路径：
+    error_logs(错因) ← student_answers(作答) → questions(kp_id)
+    只统计 is_correct == False 的错题作答。
     """
     cutoff = _now() - timedelta(days=state.get("days", 30))
     session = get_session_factory()()
@@ -83,11 +91,13 @@ def fetch_error_kps(state: QuizState) -> dict:
             .where(StudentAnswer.is_correct == False)          # noqa: E712 故意 == False：SQL 语义
             .where(StudentAnswer.submitted_at >= cutoff)
         ).all()
+
     finally:
         session.close()
 
     kp_ids = [r[0] for r in rows]
     freq = dict(Counter(kp_ids))       # Counter：计数器容器，.most_common() 常配套用
+
     return {"error_kp_ids": sorted(set(kp_ids)), "error_freq": freq}
 
 
@@ -98,10 +108,9 @@ def _now():
 
 
 def expand_prerequisites(state: QuizState) -> dict:
-    """Step 2 · 图谱外扩：错题知识点走 1~2 跳前置边，得候选集 C = E ∪ P。
+    """Step 2 · 图谱外扩：错题知识点走 1~2 跳，往前追溯根源，得候选集 C = E ∪ P。
 
-    Cypher 与架构文档 3.2 #5 一致。方向注意：seed 脚本约定
-    HAS_PREREQUISITE 从"前置点"指向"依赖它的点"，
+    seed 脚本约定: HAS_PREREQUISITE 从"前置点"指向"依赖它的点"，
     所以查某点的前置要用反向 <-[:HAS_PREREQUISITE*1..2]- 。
     """
     from app.graph_db.neo4j_client import run_query
@@ -114,10 +123,11 @@ def expand_prerequisites(state: QuizState) -> dict:
         """,
         {"ids": state["error_kp_ids"]},
     )
+
     # 候选集 = 错题点本身 ∪ 它们的前置点（DISTINCT 已在 Cypher 去重，union 再兜一次）
     prereq_ids = [r["kp_id"] for r in rows]
-    candidate_ids = sorted(set(state["error_kp_ids"]) | set(prereq_ids))
-    return {"candidate_kps": [{"kp_id": k} for k in candidate_ids]}
+    candidate_ids = sorted(set(state["error_kp_ids"]) | set(prereq_ids))  #  | 是集合并集
+    return { "candidate_kps": [{"kp_id": k} for k in candidate_ids] }
 
 
 def rank_by_bkt(state: QuizState) -> dict:
@@ -146,11 +156,12 @@ def rank_by_bkt(state: QuizState) -> dict:
 def select_quiz_questions_node(state: QuizState) -> dict:
     """Step 4 · 配题：查题库候选 → 组卷引擎抽题（纯规则，可复现）。
 
-    为什么不放 LLM：同一份掌握度必须产出同一套题，LLM 每次结果不同，
-    老师就无法信任这个测验（架构文档 4.3 原注释）。
+    为什么不放 LLM：
+        同一份掌握度必须产出同一套题，LLM 每次结果不同，老师就无法信任这个测验（架构文档 4.3 原注释）。
     """
     kp_ids = [tp["kp_id"] for tp in state["target_points"]]
     candidates = fetch_candidates_by_kp(kp_ids)
+
     # exclude：该生近期做过的题（近 7 天 student_answers，M2 简版全量排除）
     exclude = _recent_answered_ids(state["student_id"])
 
@@ -164,6 +175,7 @@ def select_quiz_questions_node(state: QuizState) -> dict:
     if gaps:
         # 宁可少题不乱补：缺口照实打印，演示时这就是"引擎诚实"的证明点
         print(f"[S-10 配题缺口] {gaps}")
+
     return {
         "question_ids": [p["id"] for p in picked],
         "questions": picked,
@@ -189,6 +201,7 @@ def persist_quiz(state: QuizState) -> dict:
     """Step 5 · 写 diagnostic_quizzes 表：target_points_json 留痕可解释性。
 
     generated_reason 面向学生的一句话："你最近在 xxx 上连错了 3 次"。
+
     陌生点 session.flush()：insert 后立刻拿数据库生成的自增 id
     （不 flush 的话 quiz.id 是 None，commit 前数据库还没发 INSERT）。
     """
@@ -197,9 +210,11 @@ def persist_quiz(state: QuizState) -> dict:
                 "generated_reason": "最近没有错题记录，暂不需要诊断测验"}
 
     top = state["target_points"][0] if state["target_points"] else None
+
     reason = (f"你最近在「{top['reason']}」对应的知识点上掌握度偏低"
               f"（{top['p_known']:.2f}），这套 8 题小测帮你逐个补齐"
-              if top else "针对性诊断测验")
+              if top else "针对性诊断测验"
+            )
 
     session = get_session_factory()()
     try:
@@ -224,6 +239,7 @@ def persist_quiz(state: QuizState) -> dict:
 
 def build_quiz_graph():
     """组装 S-10 子图：纯顺序链路，无 interrupt，不需要 checkpointer。"""
+
     builder = StateGraph(QuizState)
     builder.add_node("fetch_error_kps", fetch_error_kps)
     builder.add_node("expand_prerequisites", expand_prerequisites)

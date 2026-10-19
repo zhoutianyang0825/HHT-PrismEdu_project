@@ -24,14 +24,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.postgres import PostgresSaver
-from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.core.llm import get_llm
+from app.db.checkpointer import get_checkpointer, get_memory_checkpointer
 from app.db.session import get_session_factory
+from app.db.store import get_memory_store, get_store
 from app.graphs.student.graph import build_student_graph, make_thread_id
 from app.graphs.student.quiz_graph import build_quiz_graph
 from app.models import Question
@@ -66,63 +65,75 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="M2 学生 Agent CLI demo")
     parser.add_argument("--student-id", type=int, default=1)
     parser.add_argument("--question-id", type=int, default=None)
+    parser.add_argument("--memory", action="store_true",
+                        help="降级通路：checkpointer 与 store 都用内存版"
+                             "（不落库，重启即丢挂起会话与学生画像，仅调试用）")
     args = parser.parse_args()
 
     question = pick_question(args.question_id)
     if question is None:
         sys.exit("题库里没有题目：先跑 uv run python scripts/seed_question_bank.py")
 
-    # PostgresSaver：与业务表同库（架构 v1.6 定稿）。setup() 幂等建内部表。
-    # 陌生点：PostgresSaver 必须用 with（上下文管理器）拿实例，它要托管连接
-    with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
-        checkpointer.setup()
-        graph = build_student_graph(checkpointer=checkpointer, store=InMemoryStore())
-        quiz_graph = build_quiz_graph()   # 子图无 interrupt，不需要 checkpointer
+    # 🔴 两个记忆都是必填参数；--memory 就是那条【显式降级通路】，
+    #   降级了会在下面打印出来，不会悄悄发生。
+    if args.memory:
+        checkpointer, store = get_memory_checkpointer(), get_memory_store()
+        mode = "内存（重启即丢：挂起会话 + 学生画像都不保留，仅调试用）"
+    else:
+        checkpointer, store = get_checkpointer(), get_store()
+        mode = f"PG/{settings.postgres_db}（重启不丢）"
 
-        tid = make_thread_id(args.student_id, question.id)
-        config = {"configurable": {"thread_id": tid}}
+    graph = build_student_graph(checkpointer=checkpointer, store=store)
+    quiz_graph = build_quiz_graph()   # 子图无 interrupt，不需要 checkpointer
 
-        print(f"=== HHT棱镜课堂 · 学生端 CLI（student={args.student_id} thread={tid}）===")
-        print(f"题目[{question.id}]：{question.content}\n（标准答案对 学生 隐藏）\n")
+    tid = make_thread_id(args.student_id, question.id)
+    config = {"configurable": {"thread_id": tid}}
 
-        pending_resume = False   # True = 图正挂在 interrupt 上，下一条输入用 Command(resume=)
-        while True:
-            try:
-                text = input("学生> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if not text:
-                continue
-            if text == "退出":
-                break
+    print(f"=== HHT棱镜课堂 · 学生端 CLI（student={args.student_id} thread={tid}）===")
+    print(f"checkpointer = {mode}")
+    print(f"题目[{question.id}]：{question.content}\n（标准答案对 学生 隐藏）\n")
 
-            if text == "生成测验":
-                quiz = quiz_graph.invoke(
-                    {"student_id": args.student_id, "days": 30, "total": 8},
-                    config={"configurable": {"thread_id": f"quiz_{args.student_id}"}},
-                )
-                print_quiz(quiz)
-                continue
+    pending_resume = False   # True = 图正挂在 interrupt 上，下一条输入用 Command(resume=)
+    while True:
+        try:
+            text = input("学生> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not text:
+            continue
+        if text == "退出":
+            break
 
-            if pending_resume:
-                result = graph.invoke(Command(resume=text), config)
-                pending_resume = False
-            else:
-                result = graph.invoke(
-                    {"student_id": args.student_id, "question_id": question.id,
-                     "messages": [HumanMessage(content=text)]},
-                    config,
-                )
+        if text == "生成测验":
+            quiz = quiz_graph.invoke(
+                {"student_id": args.student_id, "days": 30, "total": 8},
+                config={"configurable": {"thread_id": f"quiz_{args.student_id}"}},
+            )
+            print_quiz(quiz)
+            continue
 
-            # interrupt 挂起：打印 hint，标记下一条输入是 resume
-            if "__interrupt__" in result:
-                payload = result["__interrupt__"][0].value
-                print(f"Agent> {payload['hint']}")
-                print(f"        （第 {payload['attempt_count']} 次引导，还想再要答案可以继续输入）")
-                pending_resume = True
-                continue
+        if pending_resume:
+            # 图挂在 interrupt 上：这次输入是"回答上一次的问题"，必须用 Command(resume=)
+            result = graph.invoke(Command(resume=text), config)
+            pending_resume = False
+        else:
+            # 图没挂起：这是学生的新发言，state 字典里带上身份 + 这句话
+            result = graph.invoke(
+                {"student_id": args.student_id, "question_id": question.id,
+                 "messages": [HumanMessage(content=text)]},
+                config,
+            )
 
-            print(f"Agent> {result['messages'][-1].content}\n")
+        # interrupt 挂起：返回值里会多一个 "__interrupt__" key，取出 payload 打印提示
+        if "__interrupt__" in result:
+            payload = result["__interrupt__"][0].value
+            print(f"Agent> {payload['hint']}")
+            print(f"        （第 {payload['attempt_count']} 次引导，还想再要答案可以继续输入）")
+            pending_resume = True
+            continue
+
+        # 没挂起 = 图跑完了，messages 最后一条就是 AI 的最终回复
+        print(f"Agent> {result['messages'][-1].content}\n")
 
     print("再见！")
 

@@ -39,7 +39,7 @@ def normalize(text: str) -> str:
 
 
 # =====================================================================
-# 第 2 层：sympy 表达式等价（带超时保护）
+# 第 2 层：用 sympy 把两边化成同一个表达式（带超时保护）
 # =====================================================================
 @contextmanager
 def _sympy_timeout(seconds: int = 3):
@@ -72,27 +72,30 @@ def _sympy_timeout(seconds: int = 3):
 def expr_equal(student: str, standard: str) -> bool:
     """表达式等价判断：simplify(学生式 - 标准式) == 0。
 
-    得到的数据：两个数学表达式字符串，类似 "x+1" 与 "1+x"
+    得到的数据：两个数学表达式字符串，一个学生写的，一个标答的，类似 "x+1" 与 "1+x"
     要做的操作：剥变量前缀 → ^ 转 ** → parse_expr 解析 → 差值化简看是否恒为 0
     返回：True=数学上等价（如 (x-2)(x-3) 与 x^2-5x+6）；False=不等价或解析失败
     为什么：等价写法（x+1 与 1+x、展开式与因式积）不该判错；
             解析失败/超时一律 False——宁可误判错也别把错判对
     """
-    # 剥掉 "x=" / "y=" 前缀：填空答 "x=2" 和标准 "2" 是一回事
+    # 剥掉 "x=" / "y=" 前缀，填空答 "x=2" 和标准 "2" 是一回事
     def _strip_var_prefix(s: str) -> str:
         return re.sub(r"^[a-z]=", "", s)
 
-    a = _strip_var_prefix(normalize(student))
-    b = _strip_var_prefix(normalize(standard))
+    a = _strip_var_prefix(normalize(student))   # 获得学生的回答
+    b = _strip_var_prefix(normalize(standard))  # 豁达标答
 
     # 交给 sympy 前，把 "^" 换成 "**"（学生习惯 ^ 表示乘方，sympy 只认 **）
     a, b = a.replace("^", "**"), b.replace("^", "**")
 
+
+    # 对 学生回答 和 标答，进行sympy的转换，转化以后，比较两个回答的差值
     try:
         with _sympy_timeout(3):
-            # 陌生参数 transformations：sympy 解析器的"预处理规则集"。
-            #   standard_transformations          基础规则（自动有理数、切分符号等）
-            #   + implicit_multiplication_application 隐式乘法/函数调用：
+            
+            #   standard_transformations     基础规则（自动有理数、切分符号等）
+            #       + 
+            #   implicit_multiplication_application 隐式乘法/函数调用：
             #     没有它 "5x" 会被解析成符号名 "5x" 直接报错；
             #     加了它 5x→5*x、2(x+1)→2*(x+1)，学生手写习惯才能被认出来
             from sympy.parsing.sympy_parser import (
@@ -102,11 +105,14 @@ def expr_equal(student: str, standard: str) -> bool:
             )
             from sympy import simplify
 
+            # 陌生参数 transformations：sympy 解析器的"预处理规则集"。
             transformations = standard_transformations + (implicit_multiplication_application,)
             lhs = parse_expr(a, transformations=transformations, evaluate=True)
             rhs = parse_expr(b, transformations=transformations, evaluate=True)
+
             # 核心一步：差值恒等于 0 ⇔ 两式数学等价
             return simplify(lhs - rhs) == 0
+        
     except Exception:
         # 解析失败 / 超时 / 没装 sympy → 判不等价（调用方前面已有归一化精确匹配兜过一轮）
         return False
@@ -125,23 +131,27 @@ def grade_choice(student: str, standard: str) -> bool:
     """
     s_letters = set(re.findall(r"[A-D]", student.upper()))
     t_letters = set(re.findall(r"[A-D]", standard.upper()))
+
+    # 学生有回答，切回答和标答一致相同，返回True
     return bool(s_letters) and s_letters == t_letters
 
 
 def _expand_alternatives(standard: str) -> list[str]:
-    """展开标准答案里的等价语法 {答案1|答案2}。
+    """把 标准答案 {答案1|答案2} -> ["答案1", "答案2"]。
 
-    得到的数据：标准答案原文，类似 "{x=1|x=-1}" 或 "x=2 或 x=3"（后者无花括号，原样返回）
-    要做的操作：把每个 {a|b} 组替换成各候选，做笛卡尔积展开
+    得到的数据：标准答案原文，类似 "{x=1|x=-1}" /  "x=2 或 x=3"
+    要做的操作：把每个 {a|b} 组替换成各候选答案，做笛卡尔积展开
     返回：可接受的标准答案变体列表，形如 ["x=1", "x=-1"]
     为什么：一道题的正确答案常有多个（如两个根），题库里用一行语法表达，判分时展开比
     """
     variants = [standard]
+
     # 逐个处理 {..} 组：每组展开后替换进现有所有变体
-    for group in re.findall(r"\{([^{}]+)\}", standard):
-        options = [o for o in group.split("|")]
-        variants = [v.replace("{" + group + "}", o) for v in variants for o in options]
-    return variants
+    for group in re.findall(r"\{([^{}]+)\}", standard): # group："x=1|x=-1"
+        options = [o for o in group.split("|")] # ["x=1", "x=-1"]
+        variants = [v.replace("{" + group + "}", o) for v in variants for o in options]  # 把 v 全部换成 o
+
+    return variants # ["x=1", "x=-1"]
 
 
 def grade_fill(student: str, standard: str) -> bool:
@@ -166,16 +176,17 @@ def grade_fill(student: str, standard: str) -> bool:
         if s == v or expr_equal(s, v):
             return True
 
-    # 层 3：多空按序比对（中文分号/英文分号切空）
-    s_blanks = [b for b in re.split(r"[;；]", s) if b]
+    # 层 3：一题多空按序比对（中文分号/英文分号切空）
+    s_blanks = [b for b in re.split(r"[;；]", s) if b]  # 判断是否有多个逗号分割的回答（就是有多空）
     t_blanks = [b for b in re.split(r"[;；]", t) if b]
     if len(s_blanks) == len(t_blanks) and len(s_blanks) > 1:
         return all(
-            sb == tb or expr_equal(sb, tb) for sb, tb in zip(s_blanks, t_blanks)
+            sb == tb or expr_equal(sb, tb) for sb, tb in zip(s_blanks, t_blanks) # 值相等 或者 表达式相同
         )
 
+
     # 层 3 之外的兜底：单空但形态是表达式（如 (x-2)(x-3) vs x^2-5x+6）
-    return expr_equal(s, t)
+    return expr_equal(s, t) # 纯表达式比对
 
 
 def grade_objective(
@@ -184,14 +195,15 @@ def grade_objective(
     standard_answer: str,
     full_score: float,
 ) -> dict:
-    """客观题判分统一入口。
+    """所有客观题判分统一入口。
 
     得到的数据（逐参数）：
-      question_type    题型，"choice" / "fill"；subjective 不进这里（走 LLM 批改图）
+      question_type    题型，选择"choice" / 填空"fill"；subjective 不进这里（走 LLM 批改图）
                        传未知值 → 按最保守的字符串比对处理，标 method="fallback"
       student_answer   学生作答原文，类似 "x=2 或 x=-2"
       standard_answer  标准答案原文，类似 "{2|-2}"
       full_score       该题满分，类似 4.0；答对给满分、答错给 0，不设部分分
+
     要做的操作：按题型分发 → 组装结果
     返回：结果 dict，形如 {"is_correct": True, "score": 4.0, "method": "expr"}
           method 记录本次走的哪条规则（choice/exact/expr/fallback），留痕排查误判
@@ -205,6 +217,8 @@ def grade_objective(
         # 先看是不是精确匹配命中（记 exact），再走三层递进（记 expr）
         if normalize(student_answer) == normalize(standard_answer):
             return {"is_correct": True, "score": full_score, "method": "exact"}
+        
+        # 再走选择题比对
         ok = grade_fill(student_answer, standard_answer)
         return {"is_correct": ok, "score": full_score if ok else 0.0, "method": "expr"}
 

@@ -1,15 +1,15 @@
-# app/tools/__init__.py
 # M4-T1 · 共享 Tool 层统一出口（架构文档 6.2）。
-#
+
 # 【这个包存在的意义】
 #   同一件查询三端都要用：学生端推同类题、老师端查某班掌握度、教研端两个 crew 查错题热点。
-#   若各写各的，就是三套 SQL / 三套 Cypher，改一个字段要改三处，还容易口径不一致
-#   （比如"错题"一处算近 7 天、一处算近 30 天，两个页面数字对不上，老师立刻不信系统）。
-#   所以：**用 LangChain 的 @tool 定义一次**，谁要用谁 import：
+#   若各写各的，就是三套 SQL / 三套 Cypher，改一个字段要改三处，代码重复，且还容易口径不一致
+
+#   所以：用 LangChain 的 @tool 定义一次，谁要用谁 import：
 #     - LangGraph 的学生/批改 Agent：bind_tools([...]) 挂给模型，模型自己决定调哪个
 #     - CrewAI 的 analysis_crew / exam_crew：经 app/crews/llm_bridge.to_crewai_tools() 包一层
 #     - 纯 Python 流程（exam_crew 的选题器）：直接 .invoke({...}) 当普通函数使
-#
+
+
 # 【返回类型铁律】所有 tool 一律返回 JSON 字符串，不返回 dict/list。
 #   卡点：CrewAI 把 tool 返回值原样拼进 LLM 上下文；dict 的 str() 形态是
 #        "{'kp_id': 'kp_a', 'avg_p_known': 0.31}"（单引号 + Python 布尔），
@@ -25,6 +25,7 @@
 #   search_question_bank        题库检索 → S-10 配题 / S-05 同类题 / T-01 选题
 #   select_questions_by_quota_tool  配额抽题的 tool 壳（底层是纯 Python 引擎，可复现）
 
+
 from app.tools.bank_tools import search_question_bank, select_questions_by_quota_tool
 from app.tools.graph_tools import (
     query_class_mastery,
@@ -33,8 +34,8 @@ from app.tools.graph_tools import (
 )
 from app.tools.stats_tools import query_paper_stats, query_student_records
 
-# ★ __all__ 的作用：声明 `from app.tools import *` 导出哪些名字。
-# 写上 __all__ 等于告诉工具链 "这些是给外部用的转出口"。同时 IDE 补全也认这份清单。
+# ★ __all__ 的作用：声明 `from app.tools import *` 导出哪些名字， 7 个工具的统一出口
+# 写上 __all__ 等于告诉工具链 "这些是给外部用的转出口"。
 __all__ = [
     "query_knowledge_graph",            # 图谱：前置链
     "query_class_mastery",              # 图谱域聚合：班级掌握度

@@ -136,11 +136,14 @@ class ErrorAttribution(BaseModel):
 # DB 过渡期助手（M4 搬 Tool 层，与 M2 nodes.py 同一套写法）
 # =====================================================================
 def _fetch_full_score(answer: StudentAnswer, question: Question) -> float:
-    """取该题满分。
+    """取该题满分是多少分值。
 
     得到的数据：answer 一条作答记录 / question 一道题目
+
     要做的操作：source_type=homework → 查 homework_questions 拿该题分值；其他来源按 100
+
     返回：满分分值（float），形如 4.0；作业题查不到分值时退回 100.0
+
     为什么：作业题分值由老师布置时定（可能 4 分），统计得分率必须用真分值，不能统一按 100
     """
     if answer.source_type == "homework":
@@ -164,18 +167,23 @@ def _fetch_full_score(answer: StudentAnswer, question: Question) -> float:
 def fetch_answer(state: GradingState) -> dict:
     """取作答记录 + 题目 + 标准答案，一次性装满 State 的上下文字段。
 
-    得到的数据：state["answer_id"]，student_answers 主键，类似 1001
-    要做的操作：查 student_answers + questions 两张表，组装判分所需全部字段
+    得到的数据：state["answer_id"] --（student_answers 主键，类似 1001）
+
+    要做的操作：查 student_answers + questions 两张表，捞出判分所需全部字段
+
     返回：增量 dict，形如 {"question_id": 88, "student_id": 42, "kp_id": "kp_panbie",
           "question_type": "subjective", "student_answer": "Δ=4-4=0，所以方程有根。", ...}
+
     为什么：后续节点都只读 state，取数集中在这里避免每个节点各查一遍库；
-            answer_id 不存在直接 raise——静默吞掉只会产生假 pending 记录
+           answer_id 不存在直接 raise，不造假
     """
+    # 获取一个独立的数据库连接
     session = get_session_factory()()
     try:
-        answer = session.get(StudentAnswer, state["answer_id"])
+        answer = session.get(StudentAnswer, state["answer_id"])     # 在StudentAnswer表中，按主键查询
         if answer is None:
             raise ValueError(f"student_answers 里没有 id={state['answer_id']} 的作答")
+        
         question = session.get(Question, answer.question_id)
         if question is None:
             raise ValueError(f"questions 里没有 id={answer.question_id} 的题目")
@@ -191,6 +199,7 @@ def fetch_answer(state: GradingState) -> dict:
             "reference_analysis": question.analysis or "",
             "full_score": _fetch_full_score(answer, question),
         }
+    
     finally:
         session.close()
 
@@ -206,8 +215,7 @@ def route_by_type(state: GradingState) -> str:
     返回：节点名，形如 "grade_objective" 或 "llm_grade_subjective"
     为什么：客观题答案确定，规则判分又快又能复现，没必要让 LLM 参与
     """
-    return "grade_objective" if state["question_type"] in ("choice", "fill") \
-        else "llm_grade_subjective"
+    return "grade_objective" if state["question_type"] in ("choice", "fill") else "llm_grade_subjective"
 
 
 # =====================================================================
@@ -277,9 +285,11 @@ def llm_grade_subjective(state: GradingState) -> dict:
         grade: SubjectiveGrade = get_llm(temperature=0).with_structured_output(
             SubjectiveGrade
         ).invoke([("system", system), ("human", human)])
+
         # 百分制 → 本题满分尺度：LLM 按 100 打分好约束（ge=0 le=100），
         # 换算后才能直接和 full_score 比、写进 student_answers.score
         ai_score = round(grade.ai_score / 100.0 * state["full_score"], 1)
+
     except Exception:
         # LLM 挂了不能堵死批改链路：给保守建议（0 分 + 说明），老师手动改
         ai_score = 0.0
@@ -294,7 +304,7 @@ def llm_grade_subjective(state: GradingState) -> dict:
     # 陌生点 interrupt 三铁律：
     #   ① 必须是节点函数体内的直接调用（包进子函数/try 会失效）
     #   ② 挂起状态靠 compile 时绑定的 checkpointer 落库，否则无法 resume
-    #   ③ 恢复只能靠 Command(resume=...)，其值 = interrupt() 的返回值
+    #   ③ 恢复只能靠 Command(resume=...)，得到的值 = interrupt() 的返回值，供后面消费
     teacher_decision = interrupt({
         "type": "ai_suggest",                       # M5 SSE 约定：按 type 弹老师确认框
         "answer_id": state["answer_id"],
@@ -307,6 +317,7 @@ def llm_grade_subjective(state: GradingState) -> dict:
 
     # ---- 3. resume 回来从这里继续：校验并装填老师决定 ----
     action = teacher_decision.get("action")
+
     if action not in ("confirm", "edit", "reject"):
         # 前端传错格式：按 reject 处理最安全（不产生任何分数）
         teacher_decision = {"action": "reject"}
@@ -317,6 +328,8 @@ def llm_grade_subjective(state: GradingState) -> dict:
         "ai_scoring_basis": grade.scoring_basis,
         "ai_confidence": grade.confidence,
         "teacher_decision": teacher_decision,
+        # confirm/edit 先写 pending，随后被 apply_teacher_decision 覆盖成 confirmed
+        "status": "rejected" if teacher_decision["action"] == "reject" else "pending",
     }
 
 
@@ -327,30 +340,33 @@ def route_by_decision(state: GradingState) -> str:
     """按老师决定分流。
 
     得到的数据：state["teacher_decision"]["action"]，confirm / edit / reject
+
     要做的操作：一次判断
+
     返回：节点名，形如 "apply_teacher_decision" 或 "commit_grade"
+
     为什么：驳回的分数不生效，不需要走"落实最终分"，直接去 commit 记录驳回即可
     """
-    return "apply_teacher_decision" if state["teacher_decision"]["action"] != "reject" \
-        else "commit_grade"
+    return "apply_teacher_decision" if state["teacher_decision"]["action"] != "reject"  else "commit_grade"
 
 
 # =====================================================================
 # 节点 3：落实老师决定
 # =====================================================================
 def apply_teacher_decision(state: GradingState) -> dict:
-    """把老师的 confirm/edit 翻译成最终分数。
+    """把老师的 confirm/edit决定， 翻译成最终分数。
 
     得到的数据：ai_score（LLM 建议分）、teacher_decision（老师决定 dict）
-    要做的操作：confirm 采纳 AI 建议分；edit 用老师改的分；评语同理可覆盖
+    要做的操作：confirm 采纳 AI 建议分；edit 用老师改的分； 评语同理可覆盖
     返回：增量 dict，形如 {"final_score": 65.0, "status": "confirmed", "is_correct": True}
-    为什么：is_correct 按 60% 得分率判——主观题拿 40% 分说明"会了一半"，
-            比"全错"更接近真实掌握水平，BKT 的输入要反映这个中间态
+
+    为什么：is_correct 按 60% 得分率判，主观题拿 40% 分说明"会了一半"，比"全错"更接近真实掌握水平，BKT 的输入要反映这个中间态
     """
     action = state["teacher_decision"]["action"]
     if action == "edit":
         final_score = float(state["teacher_decision"]["score"])
         final_comment = state["teacher_decision"].get("comment") or state["ai_comment"]
+
     else:  # confirm
         final_score = state["ai_score"]
         final_comment = state["teacher_decision"].get("comment") or state["ai_comment"]
@@ -359,7 +375,7 @@ def apply_teacher_decision(state: GradingState) -> dict:
         "final_score": final_score,
         "final_comment": final_comment,
         "status": "confirmed",
-        "is_correct": final_score >= state["full_score"] * SUBJECTIVE_PASS_RATE,
+        "is_correct": final_score >= state["full_score"] * SUBJECTIVE_PASS_RATE, # 得分不低于满分的60%，视为答对
     }
 
 
@@ -367,36 +383,51 @@ def apply_teacher_decision(state: GradingState) -> dict:
 # 节点 4：落库 + 审计（三条记录，一个事务）
 # =====================================================================
 def commit_grade(state: GradingState) -> dict:
-    """写 grading_records + 更新 student_answers + 审计埋点，同一事务 commit。
+    """把这一次的 批改结论 + 作答回填 + 审计埋点，写入数据库。
 
-    得到的数据：state 里判分/老师决定的全部最终值
+    得到的数据：state 里判分/老师批改决定的 全部最终值
     要做的操作：
-      1. grading_records 插一行：grader_type 按来源标 rule/llm/teacher
+      1. 往 grading_records 插一行：grader_type 按来源标 rule/llm/teacher
       2. student_answers 回填 is_correct/score（客观题直接生效，主观题经老师确认）
       3. audit_logs 埋点（M3-T5）：批改确认/驳回是敏感操作，必须留痕
-    返回：{"status": "confirmed", "final_score": 65.0}；重复批改时返回已有结果
+
+    返回：{"status": status, "final_score": 65.0}；重复批改时返回已有结果
+
     为什么：批改是"一次定音"的动作，三张表必须同事务落库，且不能重复写
     """
+
+    # 兜底：上游若漏写 status（如新增分支忘了赋值），按老师决定推导——
+    #   直接读 state["status"] 会在 key 缺失时抛 KeyError，整张图炸在落库前
+    status = state.get("status") or (
+        "rejected" if (state.get("teacher_decision") or {}).get("action") == "reject" else "pending"
+    )
+
     session = get_session_factory()()
     try:
         # 防重复批改（幂等保护）：同一 answer_id 已有 confirmed 记录就直接返回，
-        #   否则老师手抖点两次会写两条批改记录 + 两次 BKT 更新（掌握度被"刷"两遍）
+        #  否则老师手抖点两次会写两条批改记录 + 两次 BKT 更新（掌握度被"刷"两遍）
         already = session.execute(
             select(GradingRecord)
             .where(GradingRecord.answer_id == state["answer_id"])
             .where(GradingRecord.status == "confirmed")
         ).scalar_one_or_none()
+
+        # 幂等设计
         if already is not None:
             return {"status": already.status, "final_score": already.final_score}
 
         # ---- 1. grader_type 定型：谁拍的板就记谁 ----
         action = state["teacher_decision"].get("action", "auto")
+
         if state["question_type"] in ("choice", "fill"):
             grader_type = "rule"                    # 规则直判
+
         elif action == "edit":
             grader_type = "teacher"                 # 老师改过分
+
         else:
             grader_type = "llm"                     # 老师确认采纳了 AI 建议
+
 
         # ---- 2. 批改记录 ----
         record = GradingRecord(
@@ -406,35 +437,38 @@ def commit_grade(state: GradingState) -> dict:
             ai_comment=state.get("ai_comment"),
             final_score=state.get("final_score"),
             final_comment=state.get("final_comment"),
-            status=state["status"],                 # confirmed / rejected
+            status=status,                          # confirmed / rejected
         )
         session.add(record)
 
+
         # ---- 3. 作答回填：rejected 不回填分数（is_correct 留 NULL 待重批）----
         answer = session.get(StudentAnswer, state["answer_id"])
-        if state["status"] == "confirmed":
+        if status == "confirmed":
             answer.is_correct = state["is_correct"]
             answer.score = state["final_score"]
+
 
         # ---- 4. 审计埋点（M3-T5）：确认/驳回都是敏感操作 ----
         record_audit(
             db=session,
             user_id=state.get("teacher_user_id"),
-            action="grading.confirm" if state["status"] == "confirmed" else "grading.reject",
+            action="grading.confirm" if status == "confirmed" else "grading.reject",
             target=f"student_answers:{state['answer_id']}",
             detail=json.dumps({
                 "grader_type": grader_type,
                 "action": action,
                 "final_score": state.get("final_score"),
-                "status": state["status"],
+                "status": status,
             }, ensure_ascii=False),
         )
 
-        session.commit()   # 三张表一个事务：批改记录/作答回填/审计同生共死
+        session.commit()   # 三张表一个事务：批改记录/作答回填/审计
+
     finally:
         session.close()
 
-    return {"status": state["status"], "final_score": state.get("final_score")}
+    return {"status": status, "final_score": state.get("final_score")}
 
 
 # =====================================================================
@@ -448,11 +482,13 @@ def route_after_commit(state: GradingState) -> str:
     返回：节点名或 END，形如 "attribute_error" / "update_mastery" / END
     为什么：驳回不动分数所以也不动掌握度；答错要先归因，错因决定本次 slip 的惩罚轻重
     """
-    if state["status"] == "rejected":
+    if state["status"] == "rejected":  # 是驳回，就结束
         return END
-    if state["is_correct"] is False:
-        return "attribute_error"     # 答错要错因联动 BKT（slip 替换）
-    return "update_mastery"
+    
+    if state["is_correct"] is False:  # 错题
+        return "attribute_error"     # 答错，要总结错因，并联动 BKT（slip 替换）
+    
+    return "update_mastery"     # 答对了，BKT掌握度更新
 
 
 # =====================================================================
@@ -484,6 +520,7 @@ def attribute_error(state: GradingState) -> dict:
         ).invoke([("system", system), ("human", human)])
         error_type = result.error_type if result.error_type in ("概念不清", "方法不会", "粗心", "审题失误") \
             else "方法不会"
+        
     except Exception:
         # fail-soft：归因失败退默认错因，主链路继续
         result = ErrorAttribution(
@@ -503,6 +540,7 @@ def attribute_error(state: GradingState) -> dict:
             explanation_strategy=result.explanation_strategy,
         ))
         session.commit()
+
     finally:
         session.close()
 
@@ -545,11 +583,13 @@ def build_grading_graph(checkpointer: BaseCheckpointSaver):
     得到的数据：checkpointer 短期记忆对象，必填
                 正式服务 → get_checkpointer()（PostgresSaver，重启后仍能 resume）
                 单测/演示 → get_memory_checkpointer() 或 MemorySaver()（内存，进程退出即丢）
-                传 None 直接 ValueError——避免拖到主观题 interrupt 时才炸
+                传 None 直接 ValueError，避免拖到主观题 interrupt 时才炸
+
     要做的操作：登记 7 个节点 → 连 8 条边（3 条条件边）→ compile 冻结并绑定 checkpointer
     返回：CompiledStateGraph，可直接 invoke/stream，调用形如
           graph.invoke({"answer_id": 1001}, {"configurable": {"thread_id": "grading_1001"}})
-    为什么：interrupt 挂起必须靠 checkpointer 落库；装配与业务解耦后，演示脚本和 M5 API 各自 build 一份
+
+    为什么：interrupt 挂起必须靠 checkpointer 落库； 装配与业务解耦后，演示脚本和 M5 API 各自 build 一份
     """
     if checkpointer is None:
         raise ValueError(
@@ -567,13 +607,16 @@ def build_grading_graph(checkpointer: BaseCheckpointSaver):
     builder.add_node("attribute_error", attribute_error)
     builder.add_node("update_mastery", update_mastery_node)
 
+
     builder.add_edge(START, "fetch_answer")
     builder.add_conditional_edges("fetch_answer", route_by_type, {
         "grade_objective": "grade_objective",
         "llm_grade_subjective": "llm_grade_subjective",
     })
+
     # 客观题：直判 → commit（不经过老师）
     builder.add_edge("grade_objective", "commit_grade")
+
 
     # 主观题：LLM+interrupt → 按老师决定分流
     builder.add_conditional_edges("llm_grade_subjective", route_by_decision, {
@@ -581,10 +624,11 @@ def build_grading_graph(checkpointer: BaseCheckpointSaver):
         "commit_grade": "commit_grade",
     })
 
+
     builder.add_edge("apply_teacher_decision", "commit_grade")
 
     # commit 后：
-    # rejected 直接走END结束；
+    # rejected 驳回直接走END结束；
     # 答错 先 attribute_error（错因归因），再计算 BKT-> update_mastery；
     # 答对直接计算 BKT -> update_mastery
     builder.add_conditional_edges("commit_grade", route_after_commit, {
@@ -605,3 +649,88 @@ def make_thread_id(answer_id: int) -> str:
     一份作答一个批改会话，天然幂等。
     """
     return f"grading_{answer_id}"
+
+
+
+"""
+t1  【老师】打开"待批改"列表
+      系统：GET /teacher/grade/pending
+            → WHERE student_answers.is_correct IS NULL
+            → 列表里每条都是"还没定分"的作答
+
+t2  【老师】点其中一条的【批改】
+      系统：POST /teacher/grade/1001
+            → 拿 answer_id 造 thread_id = "grading_1001"
+            → graph.invoke({answer_id, teacher_user_id})
+
+t3  【系统】fetch_answer：查 student_answers + questions
+      一次性装满 state：题型、题干、学生作答、标准答案、解析、满分
+      找不到就直接 raise（不产生假 pending）
+
+t4  【系统】route_by_type：按题型分流
+      客观题 → 走规则判分
+      主观题 → 走 LLM 建议
+
+t5  【系统】客观题：grade_objective 规则判分
+            → is_correct / final_score / status="confirmed" 直接就位
+            → 不需要老师确认（规则确定，没有"建议"这一说）
+      ── 或 ──
+      【系统】主观题：LLM 按采分点打分
+            → ai_score（百分制）换算成本题满分尺度
+            → interrupt() 挂起，图冻结，状态写进 checkpointer
+      ★ 这里是老师第一次"被叫回来"的点
+
+t6  【老师】看到批改结果页
+      客观题：直接看到分数（这一趟就结束了）
+      主观题：看到 AI 建议弹窗——建议分、采分点逐条对照、评语、置信度
+            （API 返回 status="pending_confirm" + suggestion）
+
+t7  【老师】做裁决，三选一
+      确认（采纳 AI 建议） / 改分（给新分数） / 驳回（AI 判得不对）
+      系统：POST /teacher/grade/1001/confirm  {action, score, comment}
+
+t8  【系统】Command(resume=...) 恢复：引擎重放节点，跑到 interrupt 取走决定
+      确认/改分 → 落实最终分 final_score、评语、status="confirmed"
+                   并按 60% 得分率判 is_correct
+      驳回     → status="rejected"、final_score=None，不产生任何分数
+
+t9  【系统】commit_grade 落库（一次事务，三张表）
+      ① 幂等检查：这条已 confirmed 吗？→ 有就直接返回旧结果，不重复写
+      ② grading_records +1 行（谁批的：rule / llm / teacher）
+      ③ student_answers 回填 is_correct + score
+            ★ 只有 confirmed 才回填；驳回时保持 NULL
+      ④ audit_logs +1 行（grading.confirm / grading.reject）
+      ⑤ commit
+
+t10 【系统】route_after_commit 决定还走不走后续
+      驳回        → 直接 END（分数没生效，掌握度不动，题目留在待批列表）
+      答错        → 先做错因归因（见 t10a）
+      答对/已确认 → 直接进掌握度更新（见 t11）
+
+t10a【系统】attribute_error：LLM 四选一归因
+            概念不清 / 方法不会 / 粗心 / 审题失误（必须引用学生作答原文）
+            → 写 error_logs → error_type 交给掌握度计算
+
+t11 【系统】update_mastery_node：BKT 三步更新
+      读 get_bkt_state → 旧掌握度 + 距上次作答天数
+      算 遗忘衰减 → 贝叶斯后验（错因在这里替换 slip）→ 学习效应
+      写 sync_mastery → bkt_state 覆盖 + mastery_records 追加 + Neo4j MASTERY
+      返回 p_known_before / p_known_after
+
+t12 【老师】刷新页面
+      这条作答从待批列表消失（is_correct 已经不是 NULL 了）
+      班级雷达图上该知识点的掌握度变了
+      驳回过的那条还会留在列表里，等重批  GET /teacher/grade/pending
+
+t13  【老师】再点「批改」：
+      POST /teacher/grade/1001（同一个 thread_id：grading_1001）
+
+t14  【系统】图重放，从 START 重新跑：fetch_answer 重新取数 → LLM 重新给建议 → interrupt 再次挂起
+
+t15  【老师】这次老师点「确认」：
+      apply_teacher_decision 置 status="confirmed"
+      → commit_grade 写 confirmed 记录 + 回填 is_correct/score
+      → route_after_commit 走 update_mastery → BKT 更新
+
+t16 待批列表里这条消失，掌握度变化可见 
+"""

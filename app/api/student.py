@@ -1,26 +1,29 @@
-# app/api/student.py
-# M5-T1/T2 · 学生端端点组：SSE 流式引导 + interrupt resume + S-10 诊断测验。
-#
-# 🔴 本文件是 M5 最关键的两个打通之一（另一个在 teacher.py）：
-#   LangGraph 的 interrupt 挂起 / Command(resume) 恢复，如何跨 HTTP 请求工作——
-#
-# 【SSE 与 interrupt 的配合协议（前端按 type 字段分发）】
-#   每条 SSE 事件都是一行 "data: {json}\n\n"，json 里必有 type：
-#     type=node      中间节点完成（前端可显示"正在思考…"进度）
-#     type=interrupt 图挂起了！payload 里有本次的引导提示，前端渲染后，
-#                    下一条学生输入必须 POST /api/student/resume
-#     type=message   图跑完，content 是 Agent 最终回复
-#     type=error     出错（SSE 生成器 try/except 兜底，不静默断流）
-#     type=end       本次流结束
-#
-# 【thread_id 与会话续接】
-#   thread_id = "{student_id}_{question_id}"（M2 定死的约定）。
-#   checkpointer 是 PostgresSaver：挂起状态落 PG，后端重启后仍可 resume。
-#   同一道题的所有 HTTP 请求带同样的 student_id+question_id，就续在同一个会话上。
-#
-# 【身份守卫】
-#   学生只能操作自己（self scope）：body.student_id 必须等于当前 JWT 用户的学生档案 id。
-#   admin 代演放行。这就是"越权守卫挂载"在数据层的落地。
+"""
+app/api/student.py
+M5-T1/T2 · 学生端：SSE 流式引导 + interrupt resume + S-10 诊断测验。
+
+🔴 本文件是 M5 最关键的两个打通之一（另一个在 teacher.py）：
+  LangGraph 的 interrupt 挂起 / Command(resume) 恢复，如何跨 HTTP 请求工作——
+
+【SSE 与 interrupt 的配合协议（前端按 type 字段分发）】
+  每条 SSE 事件都是一行 "data: {json}\n\n"，json 里必有 type：
+    type=node      中间节点完成（前端可显示"正在思考…"进度）
+    type=interrupt 图挂起了！payload 里有本次的引导提示，前端渲染后，
+                   下一条学生输入必须 POST /api/student/resume
+    type=message   图跑完，content 是 Agent 最终回复
+    type=error     出错（SSE 生成器 try/except 兜底，不静默断流）
+    type=end       本次流结束
+
+【thread_id 与会话续接】
+  thread_id = "{student_id}_{question_id}"（M2 定死的约定）。
+  checkpointer 是 PostgresSaver：挂起状态落 PG，后端重启后仍可 resume。
+  同一道题的所有 HTTP 请求带同样的 student_id+question_id，就续在同一个会话上。
+
+【身份守卫】
+  学生只能操作自己（self scope）：body.student_id 必须等于当前 JWT 用户的学生档案 id。
+  admin 代演放行。这就是"越权守卫挂载"在数据层的落地。
+"""
+
 from functools import lru_cache
 import json
 
@@ -56,8 +59,7 @@ router = APIRouter()
 def _get_student_graph():
     """学生主图单例（带 PG checkpointer + PG store）。
 
-    为什么 lru_cache：build 本身很轻，但它依赖的 checkpointer/store 各持一个
-    psycopg 连接池——必须全进程只有一份，不能每个请求 new。
+    lru_cache：依赖的 checkpointer/store 各持一个psycopg 连接池，必须全进程只有一份，不能每个请求 new。
     """
     from app.db.checkpointer import get_checkpointer
     from app.db.store import get_store
@@ -73,6 +75,7 @@ def _get_grading_graph():
     from app.graphs.teacher.grading_graph import build_grading_graph
 
     return build_grading_graph(checkpointer=get_checkpointer())
+
 
 
 @lru_cache
@@ -96,13 +99,15 @@ def _own_student_or_admin(db: Session, user: CurrentUser, student_id: int) -> St
     profile = db.get(Student, student_id)
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"学生档案 {student_id} 不存在")
+    
     if "admin" not in user.roles and profile.user_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="forbidden: 只能访问自己的数据")
+    
     return profile
 
 
 def _sse(event: dict) -> str:
-    """把 dict 打包成一条 SSE 帧。格式铁律：`data: <json>\n\n`（两个换行结尾，浏览器才认为帧结束）。"""
+    """把 dict 打包成一条 SSE 格式帧。格式铁律：`data: <json>\n\n`（两个换行结尾，浏览器才认为帧结束）。"""
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
@@ -130,16 +135,18 @@ def _questions_without_answers(rows: list[Question]) -> list[dict]:
 def _stream_graph_events(graph, graph_input, config):
     """把一次图的执行包成 SSE 事件生成器（学生端与 resume 共用）。
 
-    得到的数据：graph 已编译图 / graph_input invoke 入参（dict 或 Command）/
-                config 含 thread_id
-    要做的操作：graph.stream 逐节点产事件 → 遇 __interrupt__ 发 interrupt 帧 →
-                图跑完发 message + end 帧
+    得到的数据：graph 已编译图 / graph_input invoke 入参（dict 或 Command）/ config 含 thread_id
+
+    要做的操作：graph.stream 逐节点产事件 → 遇 __interrupt__ 发 interrupt 帧 → 图跑完发 message + end 帧
+
     为什么要 try/except（架构文档坑表"SSE 生成器里的异常被吞"）：
         生成器里抛异常，前端只会看到连接断开、无任何提示——
         必须捕获后 yield 一条 type=error 帧再结束，前端才能弹出错误。
     """
     try:
+        # 按 build_student_graph（）编译好的图，执行图的流式输出，且为增量模式：每执行完一个节点，就产出一个 带增量消息的chunk
         for chunk in graph.stream(graph_input, config, stream_mode="updates"):
+
             # chunk 形如 {"classify_intent": {...增量...}}：一个节点一个 chunk
             if "__interrupt__" in chunk:
                 payload = chunk["__interrupt__"][0].value
@@ -147,16 +154,29 @@ def _stream_graph_events(graph, graph_input, config):
                 continue
 
             node_name, diff = next(iter(chunk.items()))
+
             # respond 是统一出口节点：diff.messages 最后一条就是给学生的最终回复
             if node_name == "respond" and diff.get("messages"):
                 last = diff["messages"][-1]
                 content = last.content if isinstance(last, AIMessage) else str(last)
+
+                # 抛出 sse数据帧
                 yield _sse({"type": "message", "content": content})
+
             else:
-                # 中间节点进度（前端可忽略，也可显示"正在分类意图…"）
-                yield _sse({"type": "node", "node": node_name})
+                # ★ 讲解路径补丁：explain_concept / guide_scaffold(满3轮) 会把 AIMessage 终稿写进 messages，
+                # 该类节点有增量消息，所以 需要yield返回给前端， 否则讲解永远只以 type=node 进度帧出现，前端拿不到正文。
+                msgs = diff.get("messages") if isinstance(diff, dict) else None
+                if msgs and isinstance(msgs[-1], AIMessage):
+                    yield _sse({"type": "message", "content": msgs[-1].content}) # 将新增的AIMessage的消息，包成sse 返回给前端
+
+                else:
+                    # 前端可忽略，也可显示"正在分类意图…"
+                    yield _sse({"type": "node", "node": node_name})
+
         yield _sse({"type": "end"})
-    except Exception as exc:   # noqa: BLE001 最后一道网：任何异常都要让前端知道
+
+    except Exception as exc:   #  最后一道网：任何异常都要让前端知道
         yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
 
 
@@ -185,20 +205,28 @@ def answer_stream(
     _own_student_or_admin(db, user, body.student_id)
 
     graph = _get_student_graph()
+
     config = {"configurable": {"thread_id": f"{body.student_id}_{body.question_id}"}}
 
     # 防御性 resume：图还挂着，这条输入就是"对上一次提示的回应"，不能用新输入 invoke
+    # 因为图都挂了checkpointer，所以先查：当前thread上，有没有interrupt挂起
     snap = _graph_state(graph, config)
+
+    # 如果snap.next 非空，包 Command(resume=message) 进interrupt
     if snap.next:
         gen = _stream_graph_events(graph, Command(resume=body.message), config)
+
     else:
         gen = _stream_graph_events(
             graph,
-            {"student_id": body.student_id, "question_id": body.question_id,
-             "messages": [{"role": "user", "content": body.message}]},
+            {"student_id": body.student_id, 
+             "question_id": body.question_id,
+             "messages": [{"role": "user", "content": body.message}]
+            },
             config,
         )
 
+    # fastapi的流式响应，gen=生成器函数，流式响应中，自带async for 消费yield抛出来的值
     return StreamingResponse(gen, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

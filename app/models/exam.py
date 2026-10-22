@@ -39,9 +39,11 @@ class ExamPaper(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(128))
     grade: Mapped[str] = mapped_column(String(16), index=True, comment="年级，如 初二")
+
     # exam_type ∈ {monthly, midterm, final}
     exam_type: Mapped[str] = mapped_column(String(16), comment="monthly/midterm/final")
     quota_plan_json: Mapped[dict | None] = mapped_column(JSON, comment="QuotaPlan 配额表")
+    
     # status ∈ {draft, published, archived}
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), comment="创建人（教研组长）")

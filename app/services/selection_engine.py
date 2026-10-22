@@ -184,11 +184,17 @@ def select_questions_by_quota(
 
     得到的数据：quota_items=[{"kp_id": "kp_crossmult", "difficulty": "medium",
                               "question_type": "fill", "question_count": 4}, ...]；
-                candidates_by_kp（fetch_candidates_by_kp 输出）；exclude_ids={31, 47}；per_kp_cap=2
+                candidates_by_kp（fetch_candidates_by_kp 输出）；
+                exclude_ids={31, 47}；
+                per_kp_cap=2
+
     要做的操作：单点跨行累计截断 → 过滤近期/已选 → 沿放宽链找题（题型硬约束、abnormal 沉底）
-    返回：([{"id": 12, "kp_id": "kp_crossmult", "difficulty": "medium", "quality_flag": "normal"}, ...],
-           ["kp_peifang: 配额 4 题超单知识点 2 题上限，按 2 题执行",
-            "kp_peifang: 1 题由 medium 档放宽补入", "kp_x: medium/fill 缺 2 题（…）"])
+
+    返回：(
+           [{"id": 12, "kp_id": "kp_crossmult", "difficulty": "medium", "quality_flag": "normal"}, ...],
+           ["kp_peifang: 配额 4 题超单知识点 2 题上限，按 2 题执行","kp_peifang: 1 题由 medium 档放宽补入", "kp_x: medium/fill 缺 2 题（…）"]
+        )
+
     为什么：R-08 要求"配额可打印、抽题可复现、缺口不硬凑"，这三条都落在这个纯函数里
     """
     exclude_ids = exclude_ids or set()
@@ -204,11 +210,11 @@ def select_questions_by_quota(
 
         # ---- 红线 1：单知识点 ≤ per_kp_cap，且是"跨配额项累计"口径 ----
         #   为什么要累计：同一 kp 可能出现两行配额（如"填空 2 题 + 选择 2 题"），
-        #   若只看单行，这个点最终会出 4 题，直接违反 PRD 验收第 4 条。
         remain_cap = per_kp_cap - kp_used.get(kp_id, 0)
         if remain_cap <= 0:
             gaps.append(f"{kp_id}: 超过单知识点 {per_kp_cap} 题上限，配额行被丢弃")
-            continue                                  # 整行跳过，接着处理下一行配额
+            continue   
+                                       
         if need > remain_cap:
             # 透明化：配额行要 4 题、红线只剩 2 题 → 照实记录，别让组长对着结果发懵
             gaps.append(f"{kp_id}: 配额 {need} 题超单知识点 {per_kp_cap} 题上限，按 {remain_cap} 题执行")
@@ -248,6 +254,7 @@ def select_questions_by_quota(
         for q in taken_from_pool:
             picked.append(q)
             picked_ids.add(q["id"])            # 立刻登记，防后续配额行又选中同一道题
+            
         kp_used[kp_id] = kp_used.get(kp_id, 0) + len(taken_from_pool)
 
         if reasons:

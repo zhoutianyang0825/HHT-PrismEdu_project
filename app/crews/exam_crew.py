@@ -1,4 +1,4 @@
-"""M4-T4 · R-08 试卷生成（架构文档 6.4）：命题规划 → 选题执行 → 质量审核。
+"""M4-T4 · R-08 试卷生成：命题规划 → 选题执行 → 质量审核。
 
  三角色分工：
    ① 命题规划师  唯一调 LLM 的环节，产 QuotaPlan 配额表（output_pydantic 卡格式）
@@ -14,8 +14,10 @@ from app.services.selection_engine import fetch_candidates_by_kp, select_questio
 
 # 月考（巩固型）目标分布：易 40 / 中 45 / 难 15
 MONTHLY_DIFF_TARGET = {"easy": 0.40, "medium": 0.45, "hard": 0.15}
+
 # 期中/期末（摸底型）目标分布：易 70 / 中 20 / 难 10
 MOOD_DIFF_TARGET = {"easy": 0.70, "medium": 0.20, "hard": 0.10}
+
 # 摸底型题型配比：选 : 填 : 解 ≈ 4 : 3 : 3
 MOOD_TYPE_TARGET = {"choice": 0.4, "fill": 0.3, "subjective": 0.3}
 
@@ -35,7 +37,7 @@ def _plan_quota(
     hotspots: list[dict],
     mastery_summary: str = "",
 ) -> QuotaPlan:
-    """跑单 Agent crew，产出配额表。
+    """跑单 Agent crew，产出配额表（出题策略表）。
 
     得到的数据：exam_type="monthly"；grade="初三"；subject="math"；
                 hotspots=[{"kp_id": "kp_crossmult", "name": "十字相乘法", "wrong_count": 27}, ...]；
@@ -226,11 +228,14 @@ def check_paper_hard_metrics(
 
 
 def _relax_plan(plan: QuotaPlan) -> QuotaPlan:
-    """审核不过后的降难度回退：每个配额项难度降一档。
+    """审核不过后，每个配额项难度降一档，产出新的策略表。
 
     得到的数据：plan.items=[QuotaItem(kp_id="kp_a", difficulty="hard", ...), ...]
-    要做的操作：hard→medium→easy（easy 不动），reason 末尾追加回退标记，重建 QuotaPlan
+
+    要做的操作：hard → medium → easy（easy 不动），reason 末尾追加回退标记，重建 QuotaPlan
+
     返回：新 QuotaPlan，items 里 difficulty 已降档、reason 带 "[审核回退] 难度降档重抽"
+
     为什么：审核报"过难/分布偏差"多是难题抢不到题（题库少 + abnormal 沉底），降档最有希望兑现
     """
     downgrade = {"hard": "medium", "medium": "easy", "easy": "easy"}
@@ -274,7 +279,7 @@ def _reviewer_summary(report: ReviewReport, exam_type: str, grade: str) -> str:
 
 
 # =====================================================================
-# 对外主入口：规划 → 抽题 → 审核 ≤2 轮 → 持久化
+# 对外主入口：规划 → 抽题 → 审核 ≤2 轮 → 落盘持久化
 # =====================================================================
 def run_exam_generation(
     exam_type: str,
@@ -283,56 +288,74 @@ def run_exam_generation(
     total_score: int = 100,
     created_by: int | None = None,
 ) -> dict:
-    """R-08 主流程：一张卷子从配额表到落库（draft）。
+    
+    """R-08 主流程：一张卷子从配额表（策略表）到产出试卷，再到落库（draft）。
 
     得到的数据：exam_type="monthly"；grade="初三"；subject="math"；total_score=100；created_by=3（可空）
+    
     要做的操作：查热点∪前置 → Planner 出配额表 → 循环 ≤2 轮抽题+硬校验（不过降难度）→ 出结论 → 落库
+
     返回：{"paper_id": 3, "plan": {...}, "question_ids": [7, 12, 20, ...],
           "gaps": ["kp_peifang: 配额 4 题超单知识点 2 题上限，按 2 题执行", ...],
           "review": {"passed": false, "rounds_used": 2, "metrics": {...},
                      "problems": [...], "summary": "..."}}
+
     为什么：R-08 的唯一入口，把"LLM 出策略 / Python 出结果 / 审核可回溯"串成一次调用
     """
     from app.db.session import get_session_factory
     from app.models import Chapter, ExamPaper
     from app.tools.graph_tools import query_error_hotspots
 
-    # t1 热点 + 命中集合：.invoke({...}) 是 @tool 装饰后的调用方式，返回 JSON 字符串
-    hotspots = json.loads(query_error_hotspots.invoke({"grade": grade, "subject": subject, "top_n": 10}))
+    # t1 热点 + 前置知识链集合：
+    hotspots = json.loads(query_error_hotspots.invoke({"grade": grade, "subject": subject, "top_n": 10}))  # .invoke({...}) 是 @tool 函数调用方式，返回 JSON 字符串
     hit_kp_ids = _expand_with_prerequisites({h["kp_id"] for h in hotspots})
 
-    # t2 Planner：唯一 LLM 环节；exam_type 以调用方为准，防模型抄错
+    # t2 出策略表（配额表）Planner：唯一 LLM 环节；exam_type、total_score 以传参为准，防模型抄错
     plan = _plan_quota(exam_type, grade, subject, hotspots)
     plan.exam_type = exam_type
     plan.total_score = total_score
 
-    # t3 抽题 + 硬校验，≤2 轮回退（知识点集合轮间不变，只算一次）
+    # t3 抽题 + 四项硬指标校验硬校验，2轮校验不通过，返回缺口清单
     all_kp_ids = list({it.kp_id for it in plan.items})
     picked: list[dict] = []
     gaps: list[str] = []
     passed, metrics, problems = False, {}, ["尚未抽题"]
     rounds_used = 0
 
+    # 抽2轮题目
     for round_no in range(1, MAX_ROUNDS + 1):
         rounds_used = round_no
+        # 捞题库
         candidates = fetch_candidates_by_kp(all_kp_ids)
+
+        # 根据出题策略表/配额表，抽题
         picked, gaps = select_questions_by_quota(
             quota_items=[it.model_dump() for it in plan.items],
             candidates_by_kp=candidates,
         )
+
+        # 题目的章节覆盖率
         total_chapters = _count_chapters(grade, subject)
+
+        # 抽出来的题，进行四项硬指标校验
         passed, metrics, problems = check_paper_hard_metrics(picked, plan, hit_kp_ids, total_chapters)
+
         if passed:
             break
+
         if round_no < MAX_ROUNDS:
-            plan = _relax_plan(plan)               # 降难度入下一轮
+            plan = _relax_plan(plan)               # 降难度下一轮重抽
+
         # 第 2 轮仍不过：不再重试，缺口清单原样交组长（宁可少题不错题）
 
     report = ReviewReport(
         passed=passed, rounds_used=rounds_used,
         metrics=metrics, problems=problems, summary="",
     )
+
+    # LLM 把校验数字结论，组织成人话（挂了用模板）
     report.summary = _reviewer_summary(report, exam_type, grade)
+
 
     # t5 落库（draft）：quota_plan_json 一次存 plan + 选题 + 缺口
     session = get_session_factory()()
@@ -354,9 +377,11 @@ def run_exam_generation(
         session.flush()                            # flush 后才有自增 id（commit 前 DB 已发 INSERT）
         paper_id = paper.id
         session.commit()
+
     except Exception:
         session.rollback()
         raise
+
     finally:
         session.close()
 
@@ -373,12 +398,15 @@ def run_exam_generation(
 # 小工具：Neo4j 前置链外扩 / 章节计数
 # =====================================================================
 def _expand_with_prerequisites(kp_ids: set[str], depth: int = 2) -> set[str]:
-    """把错题热点扩成"热点 ∪ 前置链"。
+    """把错题热点扩成"热点 ∪ 前置知识点链"。
 
-    得到的数据：kp_ids={"kp_crossmult", "kp_peifang"}；depth=2
-    要做的操作：Neo4j 沿 HAS_PREREQUISITE 反向边查 1~2 跳，并入原集合
-    返回：{"kp_crossmult", "kp_peifang", "kp_poly_mult", "kp_power_ops"}
-    为什么：月考要求 ≥70% 命中"错题 Top10 及其前置"——只拿热点算，会把补地基的题误判成未命中
+    得到的数据：kp_ids={"kp_crossmult", "kp_peifang"}； depth=2
+
+    要做的操作：Neo4j 沿 HAS_PREREQUISITE 反向边查 1~2 跳，得到前置知识点链，并入原集合，
+
+    返回：集合{"kp_crossmult", "kp_peifang", "kp_poly_mult", "kp_power_ops"}
+
+    为什么：月考要求 ≥70% 命中"错题 Top10 及其前置"，所以需要热点错题，及其前置知识链
     """
     try:
         from app.graph_db.neo4j_client import run_query
@@ -393,7 +421,10 @@ def _expand_with_prerequisites(kp_ids: set[str], depth: int = 2) -> set[str]:
             """,
             {"ids": sorted(kp_ids), "depth": depth},
         )
-        return kp_ids | {r["kp_id"] for r in rows}
+
+        # 两个集合取并集
+        return kp_ids | {r["kp_id"] for r in rows} 
+    
     except Exception:
         # Neo4j 挂了不炸主流程：命中率少算前置，审核会如实反映
         return set(kp_ids)

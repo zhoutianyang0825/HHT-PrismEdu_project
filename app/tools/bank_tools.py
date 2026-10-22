@@ -24,13 +24,23 @@ def search_question_bank(
     exclude_ids: list[int] | None = None,
     limit: int = 5,
 ) -> str:
-    """按知识点（可叠加难度/题型/排除项）检索题库。
+    """ 按知识点筛题，可叠加过滤条件： 难度/题型/排除近做过的题
 
-    得到的数据：kp_id="kp_crossmult"；difficulty="easy"（空=不过滤）；question_type="fill"（空=不过滤）；
-                exclude_ids=[31, 47]（近 7 天做过的）；limit=5
+    得到的数据：
+            kp_id="kp_crossmult"；
+            difficulty="easy"（空=不过滤）；
+            question_type="fill"（空=不过滤）；
+            exclude_ids=[31, 47]（近 7 天做过的）；
+            limit=5
+
     要做的操作：按 kp 筛 → 叠加难度/题型 → 剔除 exclude → 截 limit 条
-    返回：[{"id": 12, "kp_id": "kp_crossmult", "difficulty": "easy", "question_type": "fill",
-           "content": "计算：x²-5x+6=0 的解是……", "quality_flag": "normal"}, ...]
+
+    返回：[
+            {"id": 12, "kp_id": "kp_crossmult", "difficulty": "easy", "question_type": "fill",
+             "content": "计算：x²-5x+6=0 的解是……", "quality_flag": "normal"
+            }, ...
+        ]
+
     为什么：S-10 配题、S-05 推同类题、T-01 选题三处都要"按知识点捞题"，定义一次复用
     """
     from sqlalchemy import select
@@ -50,16 +60,19 @@ def search_question_bank(
             .where(Question.kp_id == str(kp_id))
             .where(Question.quality_flag != "disabled")      # ★ 硬过滤，见 docstring
         )
+
+        # 分别叠加过滤条件： 难度/题型/排除近做过的题
         if difficulty:
             stmt = stmt.where(Question.difficulty == str(difficulty))
         if question_type:
             stmt = stmt.where(Question.question_type == str(question_type))
         if exclude_ids:
             # notin_ 的坑：传空列表会生成 "NOT IN ()"，部分库直接语法错误，
-            # 所以上面用 `if exclude_ids` 挡住 None 与 []。
+            # 所以上面用 `if exclude_ids` 挡住 None / [] /False。
             stmt = stmt.where(Question.id.notin_([int(i) for i in exclude_ids]))
 
         rows = session.execute(stmt.limit(max(1, int(limit)))).all()
+
     finally:
         session.close()
 
@@ -67,7 +80,9 @@ def search_question_bank(
         {"id": i, "kp_id": kp, "difficulty": d, "question_type": t,
          # content 截 80 字：tool 返回值会进 LLM 上下文，整套题干几万字，
          # 模型反而抓不住重点。要看全文让它按 id 再查一次。
-         "content": c[:80], "quality_flag": q}
+         "content": c[:80], 
+         "quality_flag": q
+        }
         for i, kp, d, t, c, q in rows
     ]
     return json.dumps(out, ensure_ascii=False)
@@ -75,14 +90,18 @@ def search_question_bank(
 
 @tool
 def select_questions_by_quota_tool(plan_json: str, exclude_ids: list[int] | None = None) -> str:
-    """按 QuotaPlan 配额表执行抽题（壳函数，逻辑在 selection_engine）。
+    """按 QuotaPlan 配额表 执行抽题（壳函数，逻辑在 selection_engine）。
 
-    得到的数据：plan_json='{"exam_type": "monthly", "total_score": 100, "items": [...]}'
-                （JSON 文本，不是 dict）；exclude_ids=[31, 47]
+    得到的数据：
+            plan_json='{"exam_type": "monthly", "total_score": 100, "items": [...]}' ；   
+            exclude_ids=[31, 47]；
+
     要做的操作：json.loads 解析 → 按知识点捞池 → 调纯函数引擎抽题 → 结果转 JSON
+
     返回：{"picked": [{"id": 12, "kp_id": "...", "difficulty": "medium",
                       "question_type": "fill", "quality_flag": "normal"}],
           "gaps": ["kp_peifang: medium/fill 缺 2 题（放宽难度后仍不足，池中仅 1 题）"]}
+
     为什么：给 CrewAI/LangGraph 一个"能调用的门面"，而抽题规则仍留在可单测的纯函数里
     """
     from app.services.selection_engine import fetch_candidates_by_kp, select_questions_by_quota
@@ -99,7 +118,7 @@ def select_questions_by_quota_tool(plan_json: str, exclude_ids: list[int] | None
         quota_items=items,
         candidates_by_kp=candidates,
         # 外部传进来的 list[int] → set[int]：引擎内部做成员判断用 in set（O(1)），
-        # 用 list 是 O(n)，几十题看不出差别，但语义上就是"集合"，别留错类型。
         exclude_ids=set(int(i) for i in (exclude_ids or [])),
     )
+    
     return json.dumps({"picked": picked, "gaps": gaps}, ensure_ascii=False)

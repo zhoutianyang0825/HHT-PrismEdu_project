@@ -178,13 +178,19 @@ def write_back_quality_flags(metrics: list[dict], session=None) -> int:
 
 
 def metrics_context_for_crew(metrics: list[dict], title: str = "", grade: str = "") -> str:
-    """把指标压成给 crew 提示词用的紧凑 JSON 文本。
+    """把指标压成 给 crew 提示词用的紧凑 JSON 文本。
 
-    得到的数据：metrics（指标行）；title="初三数学月考试卷"；grade="初三"
+    得到的数据：
+        metrics（指标行）；
+        title="初三数学月考试卷"；
+        grade="初三"
+
     要做的操作：只留 q_id/kp_id/P/D/issues 五个字段，json.dumps
+
     返回：'{"paper_title": "初三数学月考试卷", "grade": "初三",
            "items": [{"q_id": 7, "kp_id": "kp_crossmult", "P": 0.245, "D": 0.05,
                       "issues": ["过难"]}, ...]}'
+
     为什么：score_rate 与 P 在均匀分值下重复、is_abnormal 可由阈值推出，省 token 且少干扰
     """
     slim = [

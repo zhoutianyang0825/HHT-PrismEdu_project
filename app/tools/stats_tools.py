@@ -7,8 +7,6 @@
 #     query_student_records → BKT 掌握度服务回放作答序列；学生 Agent 查"我这题以前错过没"
 #
 #   两个工具的共性：都是"把库里的事实捞出来，不做任何判断"。
-#   判断（P 是多少、算不算异常）全在 app/services/analysis.py，工具层保持哑管道，
-#   这样才能对"数字从哪来"负责——数据错看工具，算法错看服务，边界清楚。
 import json
 
 from langchain_core.tools import tool
@@ -31,10 +29,10 @@ def query_paper_stats(paper_id: int) -> str:
 
     session = get_session_factory()()
     try:
-        # session.get(模型, 主键)：按主键取一行，比 query().filter(id==).first() 更直接
+        # session.get(模型, 主键)：按主键取一行
         paper = session.get(ExamPaper, int(paper_id))
         if paper is None:
-            # 早返回也要走 finally 关 session（下面是 try/finally，return 也会触发 finally）
+            # return 也会触发 finally 关 session
             return json.dumps({"error": f"paper_id={paper_id} 不存在"}, ensure_ascii=False)
 
         quota = paper.quota_plan_json or {}
@@ -58,7 +56,7 @@ def query_paper_stats(paper_id: int) -> str:
             # score IS NOT NULL 过滤未判分作答：
             #   student_answers.is_correct 是三态（NULL=未判分/True/False），
             #   主观题老师没点确认前 score 也是 NULL。把这些行算进去，
-            #   平均分会被人为拉低，P 值直接失真——统计前必须清掉。
+            #   平均分会被人为拉低，P 值直接失真，所以统计前必须清掉。
             .where(StudentAnswer.score.isnot(None))
         ).all()
     finally:
@@ -68,9 +66,12 @@ def query_paper_stats(paper_id: int) -> str:
         {"student_id": sid, "q_id": qid, "score": float(score), "full_score": full_per_q}
         for sid, qid, score in rows
     ]
+
     return json.dumps(
-        {"paper_id": int(paper_id), "title": paper.title,
-         "full_score_per_q": full_per_q, "records": records},
+        {
+            "paper_id": int(paper_id), "title": paper.title,
+            "full_score_per_q": full_per_q, "records": records
+        },
         ensure_ascii=False,
     )
 
@@ -79,10 +80,11 @@ def query_paper_stats(paper_id: int) -> str:
 def query_student_records(student_id: int, kp_id: str) -> str:
     """查某学生在某知识点上的历次作答记录。
 
-    得到的数据：student_id=101（students.id，**不是** users.id）；kp_id="kp_crossmult"
+    得到的数据：student_id=101（不是users.id）；  kp_id="kp_crossmult" 知识点id
     要做的操作：student_answers JOIN questions 按知识点过滤，提交时间升序
     返回：[{"question_id": 12, "is_correct": false, "score": 0.0,
            "source_type": "homework", "submitted_at": "2026-10-01T12:00:00+00:00"}, ...]
+
     为什么：BKT 更新要按时间顺序回放（顺序错了遗忘衰减 Δt 会变负数）
     """
     from sqlalchemy import select
@@ -105,6 +107,7 @@ def query_student_records(student_id: int, kp_id: str) -> str:
             .where(Question.kp_id == str(kp_id))
             .order_by(StudentAnswer.submitted_at.asc())                # ★ 时间升序，见上
         ).all()
+
     finally:
         session.close()
 
@@ -122,4 +125,5 @@ def query_student_records(student_id: int, kp_id: str) -> str:
         }
         for qid, c, s, st, sa in rows
     ]
+
     return json.dumps(out, ensure_ascii=False)

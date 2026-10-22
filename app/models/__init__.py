@@ -26,6 +26,7 @@ from app.models.mastery import BKTState, MasteryRecord
 from app.models.org import Class, ResearchLead, Student, TeachingAssignment
 from app.models.user import Teacher, User, UserRole
 
+# 写了__all__，import models时
 __all__ = [
     "Base",
     "User", "UserRole", "Teacher",

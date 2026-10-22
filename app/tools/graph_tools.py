@@ -20,38 +20,35 @@ import json
 from langchain_core.tools import tool
 
 
-# ★ @tool 装饰器：把一个普通函数变成"LLM 可调用的工具"。
-#   它自动做三件事：① 用函数名当工具名；② 用 docstring 当 description（模型据此判断何时调用）；
-#   ③ 从类型注解生成 args_schema（pydantic 模型，模型据此知道参数名和类型）。
-#   代价：被装饰后函数不再是普通函数，直接 f(x) 调用会报错，必须 f.invoke({...})。
+
 @tool
 def query_knowledge_graph(kp_id: str, depth: int = 2) -> str:
     """查某知识点的前置知识链路（Neo4j 多跳）。
 
     得到的数据：kp_id="kp_crossmult"（知识点 id，填名称会静默返回空）；
                 depth=2（向前追几跳，函数内夹到 1~5，防 0/99）
-    要做的操作：沿 HAS_PREREQUISITE 反向边做 1~depth 跳变长匹配
+
+    要做的操作：沿 <-[:HAS_PREREQUISITE*1..2]- 反向边做 1~depth 跳变长匹配
+
     返回：[{"kp_id": "kp_poly_mult", "name": "整式乘法", "depth": 1}, ...]，按 depth 升序；
           无前置时 []
+
     为什么：R-04 判"异常题是否前置薄弱"、R-08 月考把热点前置纳入配额，都要这条链
     """
     from app.graph_db.neo4j_client import run_query
 
     # 【Cypher 的箭头方向为什么是反的】
     #   seed 脚本约定：HAS_PREREQUISITE 从"前置点"指出去，指向"依赖它的点"。
-    #   例：(整式乘法)-[:HAS_PREREQUISITE]->(十字相乘法)  读作"整式乘法是十字相乘法的前置"。
-    #   现在要查"十字相乘法的前置是谁"，就得逆着箭头走：<-[:HAS_PREREQUISITE*1..2]-
+    #   现在要查：某知识点的前置知识点，就得逆着箭头走：<-[:HAS_PREREQUISITE*1..2]-
     #   *1..2 是"变长关系"语法（1 到 2 跳都算），写成 *1..$depth 用参数控制跳数。
-    #   如果把箭头写正（->），查出来的是"依赖它的后继点"，语义完全反了——
-    #   命题专家会得到"这个知识点之后才学什么"，用它解释前置薄弱就是胡扯。
+
     rows = run_query(
         """
         MATCH path = (kp:KnowledgePoint {id: $kp_id})<-[:HAS_PREREQUISITE*1..$depth]-(pre)
         RETURN pre.id AS kp_id, pre.name AS name, length(path) AS depth
         ORDER BY depth
         """,
-
-        # Neo4j 参数化查询防注入（这里是内部数据，但习惯要对），
+        # Neo4j 参数化查询防注入
         # max(1, min(int(depth), 5))：把 LLM 可能给的 0/99/-1 夹到 1~5，见 docstring。
         {"kp_id": kp_id, "depth": max(1, min(int(depth), 5))},
     )
@@ -82,7 +79,6 @@ def query_class_mastery(class_id: int) -> str:
                 # p_known的平均值
                 func.avg(BKTState.p_known).label("avg_p_known"),
                 # count(distinct student_id)：这个知识点上有多少学生有记录。
-                #   不用 count(*) —— 那是行数，一个学生一个知识点只有一行，两者数值相同，但语义上"人数"更清楚
                 func.count(func.distinct(BKTState.student_id)).label("student_count"),
             )
             .join(Student, Student.id == BKTState.student_id)   # 靠学生表才能拿到 class_id
@@ -90,8 +86,9 @@ def query_class_mastery(class_id: int) -> str:
             .group_by(BKTState.kp_id)                           # 按知识点分桶
             .order_by(func.avg(BKTState.p_known).asc())         # 最薄弱优先
         ).all()
+
+    # finally 关 session：查询成功失败都归还连接，防连接池被慢慢耗干
     finally:
-        # finally 关 session：查询成功失败都归还连接，防连接池被慢慢耗干
         session.close()
 
     # round(float(p), 3)：SQL 的 avg 在不同库可能返回 Decimal，统一转 float 再保留 3 位，

@@ -23,10 +23,10 @@ async def lifespan(app: FastAPI):
     """启动/退出钩子。
 
     启动时预热 checkpointer 与 store：两个 setup() 幂等建内部表（checkpoints / store）。
-    不预热也能跑（首次请求时 lru_cache 懒建），但第一个学生请求会多等 1~2 秒建表，
-    演示时第一印象重要——预热把这笔开销挪到启动期。
+    不预热也能跑（首次请求时 lru_cache 懒建），但第一个学生请求会多等 1~2 秒建表
 
-    陌生写法 @asynccontextmanager + yield：yield 前是启动逻辑（服务起来之前跑），
+    陌生写法 @asynccontextmanager + yield：异步上下文管理器+生成器
+    yield 前是启动逻辑（服务起来之前跑），
     yield 后是退出逻辑（进程关闭时跑 finally）。
     """
     try:
@@ -36,18 +36,20 @@ async def lifespan(app: FastAPI):
         get_checkpointer()   # 内部 setup()：checkpoint 表
         get_store()          # 内部 setup()：store 表
         print("[startup] checkpointer / store 预热完成（PG 内部表就绪）")
-    except Exception as exc:   # noqa: BLE001
+
+    except Exception as exc:   
         # PG 没起也允许服务先起来（auth/admin 不依赖 checkpointer），
         # 学生端第一次用时会再试——报错信息直指容器，不吞
         print(f"[startup] ⚠️ 预热失败（PG 未就绪？）：{exc}\n"
               "          学生端/老师端批改接口在 PG 可用后自动恢复")
 
-    yield   # ← 服务运行期
+    yield   # ← 服务运行中
 
     # 退出：关 PG 连接池（checkpointer/store 各一个）
     try:
         from app.db.checkpointer import close_checkpointer
         close_checkpointer()
+
     except Exception:
         pass
 
@@ -67,12 +69,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ---- 五组路由挂载（前缀与架构文档 8.1~8.5 一一对应）----
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(student.router, prefix="/api/student", tags=["student"])
 app.include_router(teacher.router, prefix="/api/teacher", tags=["teacher"])
 app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+
 
 
 @app.get("/health", tags=["meta"])

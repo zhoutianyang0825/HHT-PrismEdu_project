@@ -1,19 +1,10 @@
-"""Embedding 双模式工厂：本地模型路径 → HuggingFace； 云端模型名 → DashScope。
+"""Embedding 双模式工厂：
+    本地模型路径 → HuggingFace； 
+    云端模型名 → DashScope。
 
- 得到的数据：LangChain Embeddings 实例（两种模式对外接口完全一致）
- 要做的操作：全项目共用一个实例（lru_cache 单例），别在循环里反复 new（有连接/加载开销）
+全项目共用一个 LangChain Embeddings实例 （lru_cache 单例），别在循环里反复 new（有连接/加载开销）
 
- 为什么双模式：
-   ① 本地 BGE-M3（.env 的 EMBED_MODEL 是路径）——免 API key、免网络，Mac 上即可跑
-   ② 云端 text-embedding-v3（.env 的 EMBED_MODEL 是模型名）——要百炼 DASHSCOPE_API_KEY
-
- 维度：两种模式输出都是 1024 维（BGE-M3 与 text-embedding-v3 恰好同维），
-   Milvus collection 的 dim 必须与之一致，详见 config.embed_dim，两处只能改一处
-
- 陌生概念 Embedding（向量化）：把一段文字压成一个 1024 个小数组成的数组（向量），
-   文字意思越相近，向量方向越接近——"鸡吃了虫子"和"虫子被鸡吃了"方向几乎一样。
-   有了向量才能做语义检索：拿用户问题的向量去库里找方向最近的片段（余弦相似度），
-   这就是 RAG 检索的底层原理；关键词重合反而不重要。
+维度：两种模式的向量模型，输出都是 config.embed_dim=1024 维 （BGE-M3 与 text-embedding-v3 同维）
 """
 from functools import lru_cache
 from pathlib import Path
@@ -59,6 +50,7 @@ def get_embeddings():
     api_key = settings.dashscope_api_key or settings.llm_api_key
     if not api_key:
         raise RuntimeError("缺 API key：请在 .env 配 DASHSCOPE_API_KEY")
+    
     return DashScopeEmbeddings(
         model=settings.embed_model,
         dashscope_api_key=api_key,

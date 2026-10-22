@@ -25,6 +25,7 @@ from app.graphs.student.safety import check_input
 from app.graphs.student.state import StudentAgentState
 from app.models import Question
 from app.rag.retriever import format_context, retrieve
+from app.services.grading import grade_objective   # M3-T1 判分服务（纯规则，与老师批改图同源）
 from pymilvus import MilvusClient
 
 # 意图四分类（开发计划 M2-T1）
@@ -175,15 +176,14 @@ HINT_STYLE = {
 
 
 def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
-    """引导节点：按 hint_level 生成阶梯提示 → interrupt 挂起等学生再输入。
+    """解题引导节点：按 hint_level 生成阶梯提示 → interrupt 挂起等学生再输入。
 
     得到的数据：attempt_count（已引导次数，首次进入为 0）、hint_level（提示阶梯级）
 
     要做的操作：
-      1. 已引导满 3 轮 → 不再吊胃口，直接给完整讲解（不 interrupt，走 respond）
+      1. 如果已引导 3 轮 → 直接返回完整讲解（有增量消息，不执行 interrupt，走 respond）
       2. 否则调 LLM 生成本层提示 → interrupt() 把提示抛给前端并挂起
-      3. Command(resume=学生新输入) 回来后，从这里继续执行：
-         把新输入记入 messages，轮数/层级 +1，然后回到 classify_intent 重新分类
+      3. Command(resume=学生新输入) 回来后，从这里继续执行，把新输入记入 messages，轮数/层级 +1，然后回到 classify_intent 重新分类
 
     ★ interrupt 三条铁律（架构文档 12 坑预警）：
       - interrupt() 必须是节点函数体内的"直接调用"，包进子函数/try 会失效
@@ -292,58 +292,64 @@ def explain_concept(state: StudentAgentState) -> dict:
 
 
 # =====================================================================
-# 判分节点（M2 简版；M3 换 app/services/grading.py + BKT）
+# 判分节点（M3-T1 判分服务接入版：分题型调不同批改方法）
 # =====================================================================
-def _normalize_answer(text: str) -> str:
-    """答案归一化：去空格/$/ LaTeX 包裹、全角转半角、转小写后再比。
-
-    为什么：
-        学生答 " (x-2)(x-3) " 和标准答案 "(X-2)(X-3)" 语义相同，不归一化会误判
-        判分的第一原则是先消灭"格式噪音"。
-    """
-
-    t = text.strip().lower().replace(" ", "").replace("$", "")
-
-    # 含空格的全角括号 替换成 全角括号， 等号规范， 中文逗号替换成 英文逗号 
-    for full, half in [("（", "("), ("）", ")"), ("＝", "="), ("，", ",")]:
-        t = t.replace(full, half)
-
-    return t
-
-
 def grade_submit(state: StudentAgentState) -> dict:
-    """提交回答 → 回答归一化 → 比对标准答案（客观题）。
+    """提交回答 → 按题型分发批改（客观题规则判分 / 主观题待老师批改）。
 
     得到的数据：学生最后一条消息（当作答案）、题目行
 
-    要做的操作：归一化 → 字符串精确比对（M2 简版）
+    要做的操作：按 question_type 分流：
+        客观题（choice/fill）→ grade_objective 三层规则判分
+        （归一化 → sympy 表达式等价 → 分题型比对，M3-T1 服务，与老师批改图同源）
 
-    M3 边界：
-        主观题走 LLM 建议批改 + interrupt 等老师确认；
-        错题走归因 + BKT。
+        主观题（subjective）→ 对话场景没有老师在场，规则判不了：
+        直接回"已提交，等老师批改"（AIMessage 终稿，respond 空过），
+        完整链路（LLM 建议 → interrupt → 老师确认 → BKT）在老师批改图那边
 
-    这里只判 is_correct，错误的引导响应交给 respond。
+    返回：
+        客观题 {"current_answer": ..., "is_correct": True/False}
+        主观题 {"current_answer": ..., "is_correct": None, "messages": [AIMessage(...)]}
+
     """
     question = _fetch_question(state["question_id"])
     student_answer = _last_human_text(state)
 
-    #  答案归一化后，比对相等，则返回True
-    is_correct = _normalize_answer(student_answer) == _normalize_answer(question.answer)
-    return {"current_answer": student_answer, "is_correct": is_correct}
+    # ---- 主观题：对话场景不判分，回执式回复（等老师批改）----
+    if question.question_type == "subjective":
+        return {
+            "current_answer": student_answer,
+            "is_correct": None,      # 三态保留 NULL：没判分，不是"判错"
+            "messages": [AIMessage(
+                content="已提交，等老师批改。主观题会先由 AI 给出建议分，"
+                        "老师确认后分数和掌握度才会更新。"
+            )],
+        }
+
+
+    # ---- 客观题（choice/fill）：调 M3-T1 判分服务 ----
+    result = grade_objective(
+        question_type=question.question_type,
+        student_answer=student_answer,
+        standard_answer=question.answer,
+        full_score=100.0,   # 对话场景无作业分值语境，按百分制给满分/0；
+                            # 作业/测验链路走批改图 fetch_answer，那里取 homework_questions.score 真分值
+    )
+    return {"current_answer": student_answer, "is_correct": result["is_correct"]}
 
 
 # =====================================================================
 # 出口节点
 # =====================================================================
 def respond(state: StudentAgentState) -> dict:
-    """统一出口：按当前状态拼最终回复。
+    """统一出口节点：按当前状态拼最终回复。
 
     已有 AIMessage（讲解/完整讲解节点自己产出了回复）→ 不再追加，避免双条。
-    被安全过滤拦截 → 兜底警告，不进 LLM（恶意内容不配消耗 token）。
+    被安全过滤拦截 → 兜底警告，不调 LLM（恶意内容不配消耗 token）。
     判分对 → 肯定 + 收尾；
     判分错 → 鼓励并指向"要讲解"路径。
     """
-    # 讲解类节点已经写了最终回复，直接通过
+    # 讲解类节点（有增量消息的节点）已经写了最终回复，response节点无增量消息，直接返回{}通过
     if state["messages"] and isinstance(state["messages"][-1], AIMessage):
         return {}
 

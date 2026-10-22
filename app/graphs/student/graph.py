@@ -44,12 +44,35 @@ def route_after_safety(state: StudentAgentState) -> str:
 # 路由函数2，核心路由表
 def route_by_intent(state: StudentAgentState) -> str:
     """意图 → 节点名 的路由表（条件边只认"返回节点名"这一种契约）。"""
+    # 通过classify_intent节点 返回的 intent字段，来取出下一步要跳转的节点
     return {
         "ask_answer": "guide_scaffold", # 直接问答案时，不能直接给答案，先引导学生
-        "submit_answer": "grade_submit", 
+        "submit_answer": "grade_submit",
         "explain": "explain_concept",   # 直接说不会做/要讲解时，启动讲解
         "off_topic": "respond",
     }[state["intent"]]
+
+
+# 路由函数3
+def route_after_guide(state: StudentAgentState) -> str:
+    """guide_scaffold 之后的去向（🔴 防死循环闸门）。
+
+    得到的数据：state["messages"] 末条消息
+
+    要做的操作：按末条消息类型分流
+      ① 末条是 AIMessage（满 3 轮分支已产出完整讲解终稿）→ 直接 "respond" 出口
+         绝不能再回 classify_intent：同一句学生输入会被再次分类成 ask_answer
+         → 再进 guide_scaffold → 再出一遍完整讲解 → 无限循环烧 token
+         
+      ② 末条是 HumanMessage（interrupt 恢复后记入了学生新回答）→ 回 "classify_intent"
+         重新分类（学生可能转而提交作答/要讲解）
+
+    返回：节点名，形如 "respond" 或 "classify_intent"
+    """
+    from langchain_core.messages import AIMessage
+
+    msgs = state.get("messages") or []
+    return "respond" if msgs and isinstance(msgs[-1], AIMessage) else "classify_intent"
 
 
 def build_student_graph(
@@ -75,10 +98,10 @@ def build_student_graph(
 
     builder.add_node("safety_check", safety_check)
     builder.add_node("classify_intent", classify_intent)
-    builder.add_node("guide_scaffold", guide_scaffold)
-    builder.add_node("explain_concept", explain_concept)
-    builder.add_node("grade_submit", grade_submit)
-    builder.add_node("respond", respond)
+    builder.add_node("guide_scaffold", guide_scaffold)    # 引导作答
+    builder.add_node("explain_concept", explain_concept)  # 生成讲解节点，rag检索
+    builder.add_node("grade_submit", grade_submit)        # 提交作答
+    builder.add_node("respond", respond)                  # llm拼装回复，选择性调llm
 
 
     builder.add_edge(START, "safety_check")
@@ -93,12 +116,17 @@ def build_student_graph(
             "grade_submit": "grade_submit",
             "explain_concept": "explain_concept",
             "respond": "respond",
-        },  # 允许的路径声明
+        },      # 允许的路径声明
     )
 
 
-    builder.add_edge("guide_scaffold", "classify_intent") # ← 回环：从引导节点再回到分类节点，"提示→再试"多轮引导
-    builder.add_edge("explain_concept", "respond")
+    # ← 回环：从引导节点再回到分类节点，"提示完，学生会有经过interrupt输入的回答，可能是讲解、提交、再次引导"
+    # 但满3轮的完整讲解分支（末条已是 AIMessage 终稿）直接去 respond，防死循环（route_after_guide）
+    builder.add_conditional_edges(
+        "guide_scaffold", route_after_guide,
+        {"classify_intent": "classify_intent", "respond": "respond"},
+    )
+    builder.add_edge("explain_concept", "respond")       # 生成的讲解内容，更新至state中，然后返回包装成 sse数据帧，yield抛出数据帧
     builder.add_edge("grade_submit", "respond")
     builder.add_edge("respond", END)
 

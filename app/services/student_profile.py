@@ -1,10 +1,11 @@
 """M2-T4（可选加分项）· InMemoryStore 学生画像 + warm_start 兜底（架构文档 4.4）。
 
 分层定位（必须能讲出来）：
-  短期记忆  PostgresSaver   作用域 thread_id     一道题的引导对话、挂起会话
-  长期记忆  InMemoryStore   作用域 namespace 元组 学生画像（跨 thread 共享）
-  真源      PostgreSQL/Neo4j 主键/节点            掌握度、作答、错因
+  短期记忆  PostgresSaver   作用域 thread_id        一道题的引导对话、挂起会话
+  长期记忆  InMemoryStore   作用域 namespace 元组    学生画像（跨 thread 共享）
+  真源      PostgreSQL/Neo4j 主键/节点              掌握度、作答、错因
 
+  
 关键坑：InMemoryStore 的"长期"只是跨 thread，不跨进程——进程重启画像清零。
 对策：PostgreSQL 当真源、Store 当缓存，进节点前幂等 warm_start 预热。
 升级路径：InMemoryStore() → PostgresStore(...) 一行切换，业务代码零改动。

@@ -38,9 +38,12 @@ def compute_item_metrics(df) -> list[dict]:
 
     得到的数据：df=[{"student_id": 101, "q_id": 7, "score": 3.0, "full_score": 4.0}, ...]
                 （长表：一行 = 一个学生一道题；list 或 DataFrame 都收）
+
     要做的操作：算卷面总分→取前后 27% 高低分组→逐题算 P/D→按阈值打标签
+
     返回：[{"q_id": 7, "P": 0.245, "D": 0.05, "score_rate": 0.245,
            "is_abnormal": True, "issues": ["过难", "区分度不足"]}, ...]（按 q_id 升序）
+
     为什么：R-04 的指标必须确定可复现、能手算校验；LLM 只负责解读，不碰数字
     """
     import pandas as pd
@@ -59,7 +62,7 @@ def compute_item_metrics(df) -> list[dict]:
     #   示例：{101: 78.0, 102: 61.0, 103: 55.0, ...}
     totals = df.groupby("student_id")["score"].sum().sort_values(ascending=False)
 
-    # ---- t3：前/后 27% 分组 ----
+    # ---- t3：前/后 27% 分组，样本截取行业通识 ----
     #   len=40 → int(40×0.27)=10 人一组
     #   len=4  → int(1.08)=1 人一组
     #   len=3  → int(0.81)=0 人一组 → 空分组算均分是 NaN，D 变 NaN，后面全废。
@@ -67,6 +70,7 @@ def compute_item_metrics(df) -> list[dict]:
     n = max(1, int(len(totals) * HIGH_LOW_GROUP_RATIO))
     high_ids = set(totals.head(n).index)     # 高分组学生 id 集合，如 {101, 105, ...}
     low_ids = set(totals.tail(n).index)      # 低分组学生 id 集合
+
 
     for q_id, grp in df.groupby("q_id"):
         # 该题满分：取第一行的 full_score。
@@ -110,12 +114,15 @@ def compute_item_metrics(df) -> list[dict]:
 
 
 def attach_kp_ids(metrics: list[dict], q_kp_map: dict[int, str]) -> list[dict]:
-    """给指标行补上 kp_id（命题质量专家查图谱要用它）。
+    """给q_id 补上 知识点id（kp_id），命题质量专家查图谱要用它。
 
     得到的数据：metrics=[{"q_id": 7, "P": 0.245, ...}, ...]；q_kp_map={7: "kp_crossmult", ...}
+
     要做的操作：逐行按 q_id 查映射填入；原地修改并返回同一 list
+
     返回：[{"q_id": 7, "P": 0.245, ..., "kp_id": "kp_crossmult"}, ...]（缺映射时填 "unknown"）
-    为什么：指标本身只有题号，而图谱接口认知识点 id，中间必须有一层映射
+
+    为什么：指标本身只有题号q_id，而图谱接口认kp_id(知识点id)，中间必须有一层映射
     """
     for row in metrics:
         row["kp_id"] = q_kp_map.get(row["q_id"], "unknown")
@@ -126,27 +133,32 @@ def pick_abnormal(metrics: list[dict]) -> list[dict]:
     """挑出异常题（is_abnormal=True）供写回与 crew 使用。
 
     得到的数据：compute_item_metrics 的输出
+
     要做的操作：列表推导筛 is_abnormal
+
     返回：[{"q_id": 7, "P": 0.245, "issues": ["过难"]}, {"q_id": 13, ...}, ...]
-    为什么：写回和提示词都只要异常题，独立成函数避免两处各写一遍漏判断
     """
     return [r for r in metrics if r["is_abnormal"]]
 
 
 def write_back_quality_flags(metrics: list[dict], session=None) -> int:
-    """把异常题的 quality_flag 从 normal 写成 abnormal（R-04 → R-08 的回流）。
+    """把异常题的 quality_flag 从 normal 写成 abnormal。
 
     得到的数据：metrics（含 q_id/is_abnormal）；session=None（不传则自建 PG 会话）
-    要做的操作：收集异常 q_id → IN 查回 → 只把 normal 改 abnormal → commit
+
+    要做的操作：收集异常 q_id → IN 查回 → 只把quality_flag的 normal 改 abnormal → commit
+
     返回：实际改动行数，如 2（disabled 与已 abnormal 都不覆盖、不计数）
-    为什么：R-08 抽题时 abnormal 沉底降权，"考后分析→考前改进"就落在这一个字段上
+
+    为什么：R-08出考试卷时，调metrics的is_abnormal=True，进行题目的沉底降权（R-04考后试卷分析 → R-08出考试卷 的回流），"考后分析→考前试卷改进"
     """
     from app.models import Question
 
-    # t1：异常题号集合（去重 + 排序）
+    # t1：异常题号（集合去重 + 排序）
     #   set 去重：同一题在长表里有 N 行，不去重会重复处理 N 次
     #   sorted：让 SQL 的 IN 参数顺序稳定，慢查询日志/审计里好对账
-    abnormal_ids = sorted({r["q_id"] for r in metrics if r["is_abnormal"]})
+    abnormal_ids = sorted({r["q_id"] for r in metrics if r["is_abnormal"]})   # 只要 is_abnormal == True，q_id取出来，升序排列成集合
+
     if not abnormal_ids:
         return 0
 
@@ -160,18 +172,19 @@ def write_back_quality_flags(metrics: list[dict], session=None) -> int:
         rows = session.query(Question).filter(Question.id.in_(abnormal_ids)).all()
         changed = 0
         for q in rows:
-            # t4：只降权 normal；disabled（人工判死刑）和已 abnormal 都不动。
-            #   若这里写成无条件赋值，就会出现"人工拉黑的题被系统改回 abnormal、
-            #   下次出卷又被抽进来"的事故——disabled 是终态，谁都不许翻。
+            # t4：只降权 normal；disabled 是终态，谁都不许翻。
             if q.quality_flag == "normal":
                 q.quality_flag = "abnormal"
+                # 记录更改了多少行数剧
                 changed += 1
         session.commit()
         return changed
+    
     except Exception:
-        # 半路失败整笔回滚：不留"改了一半"的脏状态
+        # 半路失败整笔修改回滚
         session.rollback()
         raise                               # raise 原异常（不吞），上层才知道写回失败
+
     finally:
         if own_session:                     # 只关自己开的 session，见 docstring
             session.close()

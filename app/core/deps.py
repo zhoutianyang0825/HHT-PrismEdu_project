@@ -154,6 +154,12 @@ def get_scopes(
     
     """FastAPI 依赖：scope 列表。明细/聚合两个通道在列表里并存但类型隔离。"""
     teacher_classes, research_leads = gather_scope_inputs(db, user)
+
+    # 拼出scopes 字典，数据形如：
+    # scopes = [
+    #   {"type": "detail",    "class_ids": [3, 7], "subjects": ["math"]},  # ← 科任身份给的
+    #   {"type": "aggregate", "grade": "初二",     "subject": "math"},     # ← 教研身份给的
+    # ]
     return build_scopes(user.roles, teacher_classes, research_leads, user.id)
 
 
@@ -204,12 +210,15 @@ def require_aggregate_channel(
     """聚合通道守卫：年级/班级聚合类接口（R-01、R-04、T-03）专用。
 
     放行条件：scope 里存在 type ∈ {aggregate, detail}。
+
     detail 通道天然可以看自己任教班级的聚合（T-03 班级错题汇总）。
     """
+    # 一人双角色（科任老师 + 教研组长）校验； 单角色也可以，detail通道本身也是自己任教班级的聚合； 但是不能放行self
     if any(s["type"] in {"aggregate", "detail"} for s in scopes):
         return scopes
     
     raise HTTPException(status.HTTP_403_FORBIDDEN, detail="forbidden: aggregate scope required")
+
 
 """
 角色设定：R003，researcher，负责初二数学。目标接口：GET /api/students/records（学生作答明细）。

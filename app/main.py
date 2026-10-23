@@ -6,7 +6,6 @@
 #
 #   为什么不加 --reload：会话在 PG 不会丢，但热重载会重启进程 →
 #   ① 正在进行的 SSE 流被掐断；② 多 worker 抢连接池 / 重复 setup()。
-#   演示期间宁可改代码手动重启，也不要 reload。
 #
 # 【OpenAPI 文档】启动后开 http://localhost:8000/docs 可视化调试全部端点——
 #   这是 FastAPI 自带的调试福利，比 curl 快。
@@ -60,6 +59,7 @@ app = FastAPI(
     description="以 BKT 掌握度为状态中枢的三端学情闭环 Agent 系统",
     lifespan=lifespan,
 )
+
 
 # CORS：Streamlit 调本 API 属跨源（8501 → 8000），演示环境放开
 app.add_middleware(

@@ -194,13 +194,29 @@ def answer_stream(
     """学生输入（SSE 流式返回）。核心接口：引导/讲解/判分全走这里。
 
     完整时间线（一次"求答案"交互）：
-      t1  POST /api/student/answer/stream {student_id, question_id, message}
-      t2  守卫：profile.user_id == user.id（或 admin）
-      t3  读 thread 状态：若上一轮还挂在 interrupt（学生刷新了页面再输入），
-          防御性转 resume——比让前端死记状态更稳
-      t4  graph.stream(...)：safety_check → classify_intent → … 逐节点产 SSE 帧
-      t5  guide_scaffold 里 interrupt 挂起 → 流里出现 type=interrupt 帧 → 连接结束
-      t6  学生回答后前端改调 /resume，同一 thread 续跑
+        t1  学生输入"这题答案是多少"
+        走引导链路的是"求答案"类输入："这题答案是多少" → ask_answer
+
+        t2  safety_check → classify_intent = ask_answer ✅
+
+        t3  guide_scaffold：LLM 生成第 1 层提示 → interrupt(payload) 挂起
+            └ yield interrupt 帧（前端显示提示）→ 本次请求结束 ✅
+        t3' 学生 resume 输入作答 → guide_scaffold 续跑记入 HumanMessage ✅
+
+        t4  回 classify_intent 重新分类 → "提交作答" → grade_submit ✅
+        
+        t4' 归一化后字符串比对 vs 标答 ✅（你理解对：这就是 M2 简版）
+
+        t5  答错 → respond
+            输出固定鼓励文案：
+            "还没对，别急。可以说「讲解一下」让我带你梳理思路，或者把你的计算过程发我…"
+            └ yield message 帧给前端（这句话才是抛出的增量）
+
+        t6  学生自己输入「讲解一下」→ 同一 thread 新一轮 invoke（⚠️ 这是新调用，不是"重放"）
+            └ classify_intent = explain → explain_concept（RAG+LLM）
+            └ 讲解 AIMessage 增量 → yield message 帧（补丁后能正常发到前端）✅
+
+        t7  respond 空过（末条已是 AIMessage）→ END → yield end 帧 ✅
     """
     _own_student_or_admin(db, user, body.student_id)
 

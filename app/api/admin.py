@@ -1,17 +1,19 @@
-# app/api/admin.py
-# M5-T3 · 管理后台 API（A-01）：用户 CRUD / CSV 导入 / 授课关系 / 组长任命 / 班级 / 日志。
-#
-# 【整体守卫】router 级挂 require_any("admin")——架构文档 8.5 的原话：
-#   "admin API 整体守卫挂在 router 依赖上，漏挂一个端点就是越权入口"。
-#   挂在 APIRouter(dependencies=...) 上，本文件所有端点一次覆盖，谁也漏不掉。
-#
-# 【CSV 导入的事务性（架构文档坑表"CSV 导入部分写入"）】
-#   逐行校验 → 全部通过才 commit；任何一行坏 → rollback，整批一行不进库；
-#   报告返回每条失败行的行号与原因。先在 10 行小文件验证，再上大文件。
-#
-# 【勾 researcher 必须有任命（架构文档坑表"勾了 researcher 未填任命"）】
-#   创建/修改用户时 roles 含 researcher → 必须同时给 research_leads，否则 400。
-#   空任命的 researcher 登录后处处 403，排查一次一下午——保存前拦住最便宜。
+"""
+M5-T3 · 管理后台 API（A-01）：用户 CRUD / CSV 导入 / 授课关系 / 组长任命 / 班级 / 日志。
+
+【整体守卫】router 级挂 require_any("admin")——架构文档 8.5 的原话：
+  "admin API 整体守卫挂在 router 依赖上，漏挂一个端点就是越权入口"。
+  挂在 APIRouter(dependencies=...) 上，本文件所有端点一次覆盖，谁也漏不掉。
+
+【CSV 导入的事务性（架构文档坑表"CSV 导入部分写入"）】
+  逐行校验 → 全部通过才 commit；任何一行坏 → rollback，整批一行不进库；
+  报告返回每条失败行的行号与原因。先在 10 行小文件验证，再上大文件。
+
+【勾 researcher 必须有任命（架构文档坑表"勾了 researcher 未填任命"）】
+  创建/修改用户时 roles 含 researcher → 必须同时给 research_leads，否则 400。
+  空任命的 researcher 登录后处处 403，排查一次一下午——保存前拦住最便宜。
+"""
+
 from csv import DictReader
 from io import StringIO
 import json
@@ -41,7 +43,8 @@ from app.schemas.api import (
 )
 from app.services.audit_service import record_audit
 
-# ★ 整体守卫：require_any("admin") 工厂产出的 guard 挂在组级依赖上
+
+# 整体角色守卫：require_any("admin") 工厂产出的 guard 挂在组级依赖上
 router = APIRouter(dependencies=[Depends(require_any("admin"))])
 
 VALID_ROLES = {"student", "teacher", "researcher", "admin"}
@@ -104,6 +107,7 @@ def _write_research_leads(db: Session, user_id: int, leads: list[dict]) -> None:
         db.add(ResearchLead(user_id=user_id, grade=it["grade"], subject=it.get("subject", "math")))
 
 
+
 @router.post("/users", status_code=201)
 def create_user(body: UserCreateIn, user: CurrentUser = Depends(get_current_user),
                 db: Session = Depends(get_db)):
@@ -125,6 +129,7 @@ def create_user(body: UserCreateIn, user: CurrentUser = Depends(get_current_user
                  json.dumps({"username": body.username, "roles": body.roles}, ensure_ascii=False))
     db.commit()
     return _user_out(db, u)
+
 
 
 @router.put("/users/{user_id}")
@@ -221,6 +226,7 @@ def _validate_csv_rows(csv_text: str, db: Session) -> tuple[list[dict], list[dic
     return goods, errors
 
 
+
 @router.post("/users/import")
 def import_users(body: CsvImportIn, user: CurrentUser = Depends(get_current_user),
                  db: Session = Depends(get_db)):
@@ -258,6 +264,7 @@ def import_users(body: CsvImportIn, user: CurrentUser = Depends(get_current_user
         raise
 
     return {"ok": True, "imported": len(created), "errors": [], "items": created}
+
 
 
 @router.get("/users/import-template")

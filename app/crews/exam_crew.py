@@ -292,7 +292,7 @@ def run_exam_generation(
     """R-08 主流程：一张卷子从配额表（策略表）到产出试卷，再到落库（draft）。
 
     得到的数据：exam_type="monthly"；grade="初三"；subject="math"；total_score=100；created_by=3（可空）
-    
+
     要做的操作：查热点∪前置 → Planner 出配额表 → 循环 ≤2 轮抽题+硬校验（不过降难度）→ 出结论 → 落库
 
     返回：{"paper_id": 3, "plan": {...}, "question_ids": [7, 12, 20, ...],
@@ -310,7 +310,7 @@ def run_exam_generation(
     hotspots = json.loads(query_error_hotspots.invoke({"grade": grade, "subject": subject, "top_n": 10}))  # .invoke({...}) 是 @tool 函数调用方式，返回 JSON 字符串
     hit_kp_ids = _expand_with_prerequisites({h["kp_id"] for h in hotspots})
 
-    # t2 出策略表（配额表）Planner：唯一 LLM 环节；exam_type、total_score 以传参为准，防模型抄错
+    # t2 命题规划LLM，出策略表（配额表）Planner； exam_type、total_score 再次赋传参值，防模型抄错
     plan = _plan_quota(exam_type, grade, subject, hotspots)
     plan.exam_type = exam_type
     plan.total_score = total_score

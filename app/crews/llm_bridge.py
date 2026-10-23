@@ -17,7 +17,7 @@
 #   解法：to_crewai_tools() 手工把 LangChain @tool 适配成 crewai.tools.BaseTool。
 #        共享 Tool 层"定义一次、三端复用"的承诺，全靠这 30 行兑现。
 #
-# 【CrewAI 的几个核心概念（陌生点的补课，一图流）】
+# 【CrewAI 的几个核心概念】
 #   LLM     = 模型配置对象（模型名/地址/key/温度），一次建好给所有 Agent 复用
 #   Agent   = 一个有角色设定的"AI 员工"：role（头衔）/ goal（目标）/ backstory（背景知识）
 #             + tools（能用什么工具）+ llm（用哪个模型）
@@ -39,8 +39,11 @@ def get_crewai_llm(temperature: float = 0.7):
     """CrewAI 专用 LLM 实例（惰性单例），配置与 app/core/llm.py 同源。
 
     得到的数据：temperature=0.2（配额表）/0.3（解读建议）/0.7（默认，闲聊讲解）
+
     要做的操作：把 settings 的 model/base_url/api_key 包成 crewai.LLM（底层 litellm）
+
     返回：LLM(model="openai/deepseek-v4-flash", base_url="https://dashscope...", temperature=0.2)
+
     为什么：显式传三件套，避免 litellm 去读 OPENAI_API_KEY 打到 OpenAI 官方（见文件头坑①）
     """
     from crewai import LLM
@@ -53,36 +56,35 @@ def get_crewai_llm(temperature: float = 0.7):
     )
 
 
-# 注册表：{工具名: 原 LangChain tool 实例}。
-#   Adapter._run 按 self.name 反查这里做转发。
+# 工具注册表：存{工具名: 原 LangChain tool 实例}，供 Adapter._run 按 self.name 反查
 #   为什么用模块级注册表而不是把实例塞进 pydantic 私有属性（PrivateAttr）：
 #     ① Adapter 继承 crewai 的 BaseTool，而 BaseTool 是 pydantic 模型，
 #        动态塞私有属性要额外声明 PrivateAttr，多一层心智负担；
 #     ② 注册表还能当调试入口：想知道某个工具挂在哪个实现上，print 一下即可。
-#   ⚠ 副作用：同名工具会被后注册的覆盖。本项目的工具名都是唯一的函数名，
-#     若将来出现两个同名 tool，先注册的那个会被静默替换——加断言可防。
+
 _LC_REGISTRY: dict = {}
 
 
 def to_crewai_tools(lc_tools: list):
     """把 LangChain @tool 列表适配成 CrewAI BaseTool 列表。
 
-    得到的数据：[query_knowledge_graph, query_class_mastery]（StructuredTool 实例）
+    得到的数据：[query_knowledge_graph, query_class_mastery]（langchain的 StructuredTool 实例）
+
     要做的操作：原 tool 存进注册表 → 用 name/description/args_schema 建 Adapter 实例
-    返回：[<CrewAI_tool query_knowledge_graph>, <CrewAI_tool query_class_mastery>]，
-          可直接塞 Agent(tools=[...])
-    为什么：crewai-tools 没装，Tool.from_langchain 不可用，只能自己写 30 行适配器
+
+    返回：[<CrewAI_tool query_knowledge_graph>, <CrewAI_tool query_class_mastery>]，可直接塞 Agent(tools=[...])
+
+    为什么：StructuredTool 实例，不能作为CrewAI_tool，给 crewai的agent使用，只能写 30 行适配器
     """
     from crewai.tools import BaseTool
 
     class _LangChainAdapter(BaseTool):
         """CrewAI 工具的标准形态：三个元信息字段 + 一个 _run 实现。
 
-        name/description/args_schema 三行不是普通类属性，而是 pydantic 的"字段声明"
-        （带类型注解），实例化时用关键字参数赋值。
-          name         → 工具名（LLM 调用时按这个名）
-          description  → 工具说明（LLM 判断"该不该调"的唯一依据）
-          args_schema  → 参数模型（LLM 按它填参；CrewAI 按它校验）
+        name/description/args_schema 三行不是普通类属性，而是 pydantic 的"字段声明"，实例化时用关键字参数赋值。
+            name         → 工具名（LLM 调用时按这个名）
+            description  → 工具说明（LLM 判断"该不该调"的唯一依据）
+            args_schema  → 参数模型（LLM 按它填参；CrewAI 按它校验）
         """
 
         name: str
@@ -99,9 +101,11 @@ def to_crewai_tools(lc_tools: list):
             return _LC_REGISTRY[self.name].invoke(kwargs)
 
     adapters = []
+
     for lc in lc_tools:
         _LC_REGISTRY[lc.name] = lc          # t2：登记转发目标
         adapters.append(_LangChainAdapter(
             name=lc.name, description=lc.description, args_schema=lc.args_schema,
         ))
+        
     return adapters

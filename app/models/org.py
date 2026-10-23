@@ -39,7 +39,7 @@ class Student(Base):
 
 
 class TeachingAssignment(Base):
-    """teacher 角色的明细 scope 数据源：王老师教哪些班、什么学科。"""
+    """teacher 角色的明细 scope 权限清单：王老师教哪些班、什么学科。"""
 
     __tablename__ = "teaching_assignments"
     __table_args__ = (UniqueConstraint("teacher_id", "class_id", "subject", name="uq_teaching"),)

@@ -1,17 +1,19 @@
-# app/api/auth.py
-# M5-T1 · 登录端点：用户名密码 → 多角色 JWT（roles: [...] 数组一次签发）。
-#
-# 【完整时间线】（开发计划 M5 完成判据的 curl 场景）
-#   t1  POST /api/auth/login {"username": "R003", "password": "..."}
-#   t2  锁定检查：security.is_locked —— 15 分钟窗口内错满 5 次 → 423，试都不让试
-#   t3  查 users 表：找不到 / is_active=False → 401（停用账号即使密码对也不放行）
-#   t4  verify_password（bcrypt checkpw）失败 → register_failed_login 记一笔 → 401
-#   t5  查 user_roles 表拼 roles 数组，如 ["teacher", "researcher"]
-#   t6  create_access_token 签 12h JWT；清空失败计数；返回 token + 角色 + 学生档案 id
-#
-# 【为什么返回体里带 student_id】
-#   JWT 里只有 users.id，但学生端所有业务接口用的都是 students.id（档案 id）。
-#   登录时顺手查一次 students 表带上，前端就不用再调"我是谁"接口。
+"""
+M5-T1 · 登录端点：用户名密码 → 多角色 JWT（roles: [...] 数组一次签发）。
+
+【完整时间线】（开发计划 M5 完成判据的 curl 场景）
+  t1  POST /api/auth/login {"username": "R003", "password": "..."}
+  t2  锁定检查：security.is_locked —— 15 分钟窗口内错满 5 次 → 423，试都不让试
+  t3  查 users 表：找不到 / is_active=False → 401（停用账号即使密码对也不放行）
+  t4  verify_password（bcrypt checkpw）失败 → register_failed_login 记一笔 → 401
+  t5  查 user_roles 表拼 roles 数组，如 ["teacher", "researcher"]
+  t6  create_access_token 签 12h JWT；清空失败计数；返回 token + 角色 + 学生档案 id
+
+【为什么返回体里带 student_id】
+  JWT 里只有 users.id，但学生端所有业务接口用的都是 students.id（档案 id）。
+  登录时顺手查一次 students 表带上，前端就不用再调"我是谁"接口。
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session

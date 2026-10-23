@@ -17,16 +17,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import admin, auth, research, student, teacher
 
 
-@asynccontextmanager
+@asynccontextmanager # 把yield生成器函数，包成生命周期钩子，自带__aenter__ 执行 yield【前】的代码 / __aexit__() 执行 yield【后】的代码
 async def lifespan(app: FastAPI):
-    """启动/退出钩子。
+    """生命周期钩子函数。
 
-    启动时预热 checkpointer 与 store：两个 setup() 幂等建内部表（checkpoints / store）。
-    不预热也能跑（首次请求时 lru_cache 懒建），但第一个学生请求会多等 1~2 秒建表
-
-    陌生写法 @asynccontextmanager + yield：异步上下文管理器+生成器
-    yield 前是启动逻辑（服务起来之前跑），
-    yield 后是退出逻辑（进程关闭时跑 finally）。
+    yield 是钩子锚点：
+        yield 前是启动逻辑（服务起来之前跑），启动时执行 get_checkpointer()和 get_store()，预热 checkpointer 与 store。
+        yield 后是退出逻辑（进程关闭时跑 finally）。
     """
     try:
         from app.db.checkpointer import get_checkpointer
@@ -70,7 +67,7 @@ app.add_middleware(
 )
 
 
-# ---- 五组路由挂载（前缀与架构文档 8.1~8.5 一一对应）----
+# ---- 总路由口：五组路由挂载（前缀与架构文档 8.1~8.5 一一对应）----
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(student.router, prefix="/api/student", tags=["student"])
 app.include_router(teacher.router, prefix="/api/teacher", tags=["teacher"])

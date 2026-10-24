@@ -144,8 +144,16 @@ class UserCreateIn(BaseModel):
     roles: list[Literal["student", "teacher", "researcher", "admin"]] = Field(
         min_length=1, description="角色数组"
     )
+    
     research_leads: list[dict] | None = Field(
         default=None, description="researcher 任命 [{grade, subject}]，勾 researcher 时必填"
+    )
+
+    class_id: int | None = Field(
+        default=None, description="student 就读班级 classes.id，勾 student 时必填（与 CSV 的 classes 列同规则）"
+    )
+    teaching: list[dict] | None = Field(
+        default=None, description="teacher 授课关系 [{class_id, subject}]，勾 teacher 时可给；传了整体替换"
     )
 
 
@@ -157,6 +165,10 @@ class UserUpdateIn(BaseModel):
     roles: list[Literal["student", "teacher", "researcher", "admin"]] | None = None
     password: str | None = Field(default=None, min_length=8, max_length=72, description="重置密码")
     research_leads: list[dict] | None = Field(default=None, description="roles 含 researcher 时同步")
+    class_id: int | None = Field(default=None, description="student 就读班级 classes.id；传了即迁移班级")
+    teaching: list[dict] | None = Field(
+        default=None, description="teacher 授课关系 [{class_id, subject}]；传了整体替换，传 [] 清空"
+    )
 
 
 class CsvImportIn(BaseModel):

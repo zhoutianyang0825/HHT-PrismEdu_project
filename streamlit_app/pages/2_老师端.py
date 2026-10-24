@@ -131,8 +131,10 @@ if classes:
 
     with st.expander("该作业提交情况", expanded=False):
         hw_id = st.number_input("作业 id", min_value=1, value=1, key="sub_hw")
-        subs = api_client.api("GET", f"/api/teacher/homework/{hw_id}/submissions")
-        if subs:
-            st.dataframe(subs, use_container_width=True)
+        # 接口按页返回：{total, page, size, homework, items}
+        subs = api_client.api("GET", f"/api/teacher/homework/{hw_id}/submissions?page=1&size=20")
+        rows = (subs or {}).get("items", [])
+        if rows:
+            st.dataframe(rows, use_container_width=True)
         else:
             st.caption("暂无作答记录")

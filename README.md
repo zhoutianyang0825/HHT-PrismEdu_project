@@ -25,19 +25,18 @@ uv run python scripts/check_env.py
 
 # 3) 建表 + 灌数据（幂等；--wipe 可清平重灌）
 uv run alembic upgrade head
-uv run python scripts/seed_knowledge_graph.py     # Neo4j 图谱 ~80 节点
-uv run python scripts/seed_question_bank.py       # 185 题 -> PG + Milvus
+uv run python scripts/seed_knowledge_graph.py     # Neo4j 知识点图谱 ~80 节点
+uv run python scripts/seed_question_bank.py       # 题库185 题 -> PG + Milvus
 uv run python scripts/seed_textbook.py            # 教材切片 -> textbook_math
 
 # 4) 演示数据（账号/班级/学习历史；幂等，可反复跑）
 uv run python scripts/gen_demo_data.py
 
 # 5) 起服务（🔴 不加 --reload：热重载会掐断 SSE 流）
-uv run uvicorn app.main:app --port 8000
-uv run streamlit run streamlit_app/Home.py        # 另开终端
+uv run uvicorn app.main:app --port 8100
 ```
 
-API 可视化调试：<http://localhost:8000/docs>（FastAPI 自带，比 curl 快）。
+API 可视化调试：<http://localhost:8100/docs>（FastAPI 自带，比 curl 快）。
 
 ---
 

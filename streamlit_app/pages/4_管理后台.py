@@ -19,8 +19,10 @@ st.title("🛠️ A-01 管理后台")
 # ================================================================
 # P0-1 · CSV 批量导入（逐行校验 / 全过才写 / 失败报告带行号）
 # ================================================================
-st.subheader("📥 P0 · 用户 CSV 批量导入")
-st.caption("格式：username,password,name,roles（角色用分号分隔，如 teacher;researcher）")
+st.subheader("📥 P0 · 组织账户 CSV 批量导入（大宽表）")
+st.caption("格式：username,password,name,roles,classes,student_no,lead_grades　|　"
+           "classes=年级:班名（如 初三:1班，多班用分号）；student 必填 classes；"
+           "researcher 必填 lead_grades（年级）；多角色各列都填。任教关系/任命小批量也可用下方手动窗口")
 if st.button("下载模板", key="tpl"):
     import httpx
     r = httpx.get(f"{api_client.base_url()}/api/admin/users/import-template",
@@ -28,13 +30,14 @@ if st.button("下载模板", key="tpl"):
     st.code(r.text, language="csv")
 
 csv_text = st.text_area("粘贴 CSV 内容", height=140,
-                        value="username,password,name,roles\n"
-                              "S201,Passw0rd1,王小红,student\n"
-                              "T021,Passw0rd2,赵老师,teacher\n")
+                        value="username,password,name,roles,classes,student_no,lead_grades\n"
+                              "S201,Passw0rd1,王小红,student,初三:1班,2026201,\n"
+                              "T021,Passw0rd2,赵老师,teacher,初三:1班,,\n")
 if st.button("开始导入", type="primary"):
     out = api_client.api("POST", "/api/admin/users/import", json_body={"csv_content": csv_text})
     if out.get("ok"):
-        st.success(f"导入成功 {out['imported']} 人")
+        st.success(f"导入成功 {out['imported']} 人（学生档案 {out.get('students', 0)} / "
+                   f"任教关系 {out.get('teaching_assignments', 0)} / 教研任命 {out.get('research_leads', 0)}）")
         st.dataframe(out.get("items", []), use_container_width=True)
     else:
         # 事务性展示：整批未写 + 每条坏行的行号与原因

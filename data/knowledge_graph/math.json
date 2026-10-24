@@ -1,206 +1,701 @@
 {
   "subject": "math",
   "grade": "初三",
-  "textbook": "人教版初中数学（九年级为主，含八上整式基础前置章）",
-  "version": "v1.0",
-  "note": "chapters[].knowledge_points 为该章知识点；prerequisite_edges 的 from=前置点、to=依赖它的点。导入 Neo4j 时存为 (from)-[:HAS_PREREQUISITE]->(to)，这样 MATCH (kp)<-[:HAS_PREREQUISITE*1..2]-(p) 查到的 p 就是 kp 的前置点。",
+  "textbook": "人教版初中数学 九年级（上/下）全册",
+  "version": "v2.0",
+  "note": "人教版初三（九上21-25章、九下26-29章）全册知识点图谱。chapters[].knowledge_points 为该章知识点；prerequisite_edges 的 from=前置点、to=依赖它的点。导入 Neo4j 时存为 (from)-[:HAS_PREREQUISITE]->(to)。",
   "chapters": [
     {
-      "id": "ch_algebra_basis",
-      "name": "整式的基础运算",
-      "grade": "初二",
-      "order": 0,
-      "knowledge_points": [
-        { "id": "kp_power_ops",      "name": "幂的运算",       "difficulty": 0.3, "description": "同底数幂乘除、幂的乘方、积的乘方" },
-        { "id": "kp_poly_mult",      "name": "整式乘法",       "difficulty": 0.4, "description": "单项式×多项式、多项式×多项式" },
-        { "id": "kp_mul_formulas",   "name": "乘法公式",       "difficulty": 0.5, "description": "平方差公式与完全平方公式" },
-        { "id": "kp_factor_common",  "name": "提公因式法",     "difficulty": 0.3, "description": "因式分解第一步：找公因式提出来" }
-      ]
-    },
-    {
       "id": "ch_quadratic",
-      "name": "一元二次方程",
+      "name": "第21章 一元二次方程",
       "grade": "初三",
       "order": 1,
       "knowledge_points": [
-        { "id": "kp_qe_definition",   "name": "一元二次方程的概念", "difficulty": 0.3, "description": "只含一个未知数、最高次数为2的整式方程" },
-        { "id": "kp_qe_general_form", "name": "一般形式",           "difficulty": 0.3, "description": "ax^2+bx+c=0 (a≠0)，识别各项系数" },
-        { "id": "kp_direct_open",     "name": "直接开平方法",       "difficulty": 0.4, "description": "x^2=p 或 (x+m)^2=p 型方程" },
-        { "id": "kp_peifang",         "name": "配方法",             "difficulty": 0.6, "description": "配成完全平方式求解，配方的手就是完全平方公式" },
-        { "id": "kp_discriminant",    "name": "判别式",             "difficulty": 0.5, "description": "Δ=b^2-4ac 判断根的情况" },
-        { "id": "kp_gongshi",         "name": "公式法",             "difficulty": 0.6, "description": "求根公式 x=(-b±√Δ)/2a" },
-        { "id": "kp_qe_root_check",   "name": "验根与根的情况讨论", "difficulty": 0.5, "description": "分式方程增根检验、含参方程根的讨论" },
-        { "id": "kp_yinshi",          "name": "因式分解法",         "difficulty": 0.5, "description": "降次思想：A·B=0 则 A=0 或 B=0" },
-        { "id": "kp_crossmult",       "name": "十字相乘法",         "difficulty": 0.7, "description": "x^2+px+q 型拆成 (x+m)(x+n)" },
-        { "id": "kp_vieta",           "name": "根与系数关系",       "difficulty": 0.7, "description": "韦达定理：x1+x2=-b/a，x1·x2=c/a" },
-        { "id": "kp_qe_growth",       "name": "增长率问题",         "difficulty": 0.6, "description": "a(1+x)^2=b 型实际应用" },
-        { "id": "kp_qe_area",         "name": "面积问题",           "difficulty": 0.6, "description": "由图形面积列一元二次方程" },
-        { "id": "kp_qe_apply_select", "name": "解法选型",           "difficulty": 0.6, "description": "拿到方程先判断用哪种解法最快" }
+        {
+          "id": "kp_qe_definition",
+          "name": "一元二次方程的概念",
+          "difficulty": 0.3,
+          "description": "只含一个未知数、最高次数为2的整式方程"
+        },
+        {
+          "id": "kp_qe_general_form",
+          "name": "一般形式",
+          "difficulty": 0.3,
+          "description": "ax^2+bx+c=0 (a≠0)，识别各项系数"
+        },
+        {
+          "id": "kp_direct_open",
+          "name": "直接开平方法",
+          "difficulty": 0.4,
+          "description": "x^2=p 或 (x+m)^2=p 型方程"
+        },
+        {
+          "id": "kp_peifang",
+          "name": "配方法",
+          "difficulty": 0.6,
+          "description": "配成完全平方式求解，配方的手就是完全平方公式"
+        },
+        {
+          "id": "kp_discriminant",
+          "name": "判别式",
+          "difficulty": 0.5,
+          "description": "Δ=b^2-4ac 判断根的情况"
+        },
+        {
+          "id": "kp_gongshi",
+          "name": "公式法",
+          "difficulty": 0.6,
+          "description": "求根公式 x=(-b±√Δ)/2a"
+        },
+        {
+          "id": "kp_qe_root_check",
+          "name": "验根与根的情况讨论",
+          "difficulty": 0.5,
+          "description": "分式方程增根检验、含参方程根的讨论"
+        },
+        {
+          "id": "kp_yinshi",
+          "name": "因式分解法",
+          "difficulty": 0.5,
+          "description": "降次思想：A·B=0 则 A=0 或 B=0"
+        },
+        {
+          "id": "kp_crossmult",
+          "name": "十字相乘法",
+          "difficulty": 0.7,
+          "description": "x^2+px+q 型拆成 (x+m)(x+n)"
+        },
+        {
+          "id": "kp_vieta",
+          "name": "根与系数关系",
+          "difficulty": 0.7,
+          "description": "韦达定理：x1+x2=-b/a，x1·x2=c/a"
+        },
+        {
+          "id": "kp_qe_growth",
+          "name": "增长率问题",
+          "difficulty": 0.6,
+          "description": "a(1+x)^2=b 型实际应用"
+        },
+        {
+          "id": "kp_qe_area",
+          "name": "面积问题",
+          "difficulty": 0.6,
+          "description": "由图形面积列一元二次方程"
+        },
+        {
+          "id": "kp_qe_apply_select",
+          "name": "解法选型",
+          "difficulty": 0.6,
+          "description": "拿到方程先判断用哪种解法最快"
+        }
       ]
     },
     {
       "id": "ch_quadratic_func",
-      "name": "二次函数",
+      "name": "第22章 二次函数",
       "grade": "初三",
       "order": 2,
       "knowledge_points": [
-        { "id": "kp_func_definition",    "name": "二次函数的概念",     "difficulty": 0.3, "description": "y=ax^2+bx+c (a≠0)" },
-        { "id": "kp_func_vertex_form",   "name": "顶点式",             "difficulty": 0.5, "description": "y=a(x-h)^2+k，顶点(h,k)" },
-        { "id": "kp_func_axis",          "name": "开口方向与对称轴",   "difficulty": 0.4, "description": "a定开口，x=-b/2a 定对称轴" },
-        { "id": "kp_func_graph",         "name": "图象与性质",         "difficulty": 0.5, "description": "五点法画草图、读图" },
-        { "id": "kp_func_abc",           "name": "系数符号判断",       "difficulty": 0.7, "description": "由图象判断a、b、c及b^2-4ac的符号" },
-        { "id": "kp_func_increase",      "name": "增减性",             "difficulty": 0.5, "description": "对称轴两侧的增减规律" },
-        { "id": "kp_func_shift",         "name": "图象平移",           "difficulty": 0.5, "description": "左加右减、上加下减" },
-        { "id": "kp_func_maxmin",        "name": "最值问题",           "difficulty": 0.6, "description": "定区间上的最大最小值" },
-        { "id": "kp_func_roots",         "name": "与x轴交点",          "difficulty": 0.6, "description": "图象与x轴交点横坐标即对应方程的根" },
-        { "id": "kp_func_undetermined",  "name": "待定系数法求解析式", "difficulty": 0.6, "description": "一般式/顶点式/交点式的选择" },
-        { "id": "kp_func_apply",         "name": "实际应用-抛物线",    "difficulty": 0.7, "description": "利润最大化、抛物线拱桥等建模" }
+        {
+          "id": "kp_func_definition",
+          "name": "二次函数的概念",
+          "difficulty": 0.3,
+          "description": "y=ax^2+bx+c (a≠0)"
+        },
+        {
+          "id": "kp_func_vertex_form",
+          "name": "顶点式",
+          "difficulty": 0.5,
+          "description": "y=a(x-h)^2+k，顶点(h,k)"
+        },
+        {
+          "id": "kp_func_axis",
+          "name": "开口方向与对称轴",
+          "difficulty": 0.4,
+          "description": "a定开口，x=-b/2a 定对称轴"
+        },
+        {
+          "id": "kp_func_graph",
+          "name": "图象与性质",
+          "difficulty": 0.5,
+          "description": "五点法画草图、读图"
+        },
+        {
+          "id": "kp_func_abc",
+          "name": "系数符号判断",
+          "difficulty": 0.7,
+          "description": "由图象判断a、b、c及b^2-4ac的符号"
+        },
+        {
+          "id": "kp_func_increase",
+          "name": "增减性",
+          "difficulty": 0.5,
+          "description": "对称轴两侧的增减规律"
+        },
+        {
+          "id": "kp_func_shift",
+          "name": "图象平移",
+          "difficulty": 0.5,
+          "description": "左加右减、上加下减"
+        },
+        {
+          "id": "kp_func_maxmin",
+          "name": "最值问题",
+          "difficulty": 0.6,
+          "description": "定区间上的最大最小值"
+        },
+        {
+          "id": "kp_func_roots",
+          "name": "与x轴交点",
+          "difficulty": 0.6,
+          "description": "图象与x轴交点横坐标即对应方程的根"
+        },
+        {
+          "id": "kp_func_undetermined",
+          "name": "待定系数法求解析式",
+          "difficulty": 0.6,
+          "description": "一般式/顶点式/交点式的选择"
+        },
+        {
+          "id": "kp_func_apply",
+          "name": "实际应用-抛物线",
+          "difficulty": 0.7,
+          "description": "利润最大化、抛物线拱桥等建模"
+        }
       ]
     },
     {
       "id": "ch_rotation",
-      "name": "旋转",
+      "name": "第23章 旋转",
       "grade": "初三",
       "order": 3,
       "knowledge_points": [
-        { "id": "kp_rot_properties", "name": "旋转的性质",     "difficulty": 0.4, "description": "旋转前后对应边角相等、对应点到旋转中心距离相等" },
-        { "id": "kp_rot_coord",      "name": "坐标系中的旋转", "difficulty": 0.5, "description": "绕原点旋转90°/180°的坐标规律" },
-        { "id": "kp_rot_center",     "name": "中心对称",       "difficulty": 0.4, "description": "旋转180°重合的两图形" },
-        { "id": "kp_rot_figure",     "name": "中心对称图形",   "difficulty": 0.4, "description": "自身关于某点中心对称的图形识别" }
+        {
+          "id": "kp_rot_properties",
+          "name": "旋转的性质",
+          "difficulty": 0.4,
+          "description": "旋转前后对应边角相等、对应点到旋转中心距离相等"
+        },
+        {
+          "id": "kp_rot_coord",
+          "name": "坐标系中的旋转",
+          "difficulty": 0.5,
+          "description": "绕原点旋转90°/180°的坐标规律"
+        },
+        {
+          "id": "kp_rot_center",
+          "name": "中心对称",
+          "difficulty": 0.4,
+          "description": "旋转180°重合的两图形"
+        },
+        {
+          "id": "kp_rot_figure",
+          "name": "中心对称图形",
+          "difficulty": 0.4,
+          "description": "自身关于某点中心对称的图形识别"
+        }
       ]
     },
     {
       "id": "ch_circle",
-      "name": "圆",
+      "name": "第24章 圆",
       "grade": "初三",
       "order": 4,
       "knowledge_points": [
-        { "id": "kp_circle_def",           "name": "圆的定义与弦弧",   "difficulty": 0.3, "description": "弦、弧、圆心角、圆周角的基本概念" },
-        { "id": "kp_circle_perp",          "name": "垂径定理",         "difficulty": 0.6, "description": "垂直于弦的直径平分弦与弧" },
-        { "id": "kp_circle_central",       "name": "圆心角与弧弦关系", "difficulty": 0.5, "description": "等圆心角对等弧等弦" },
-        { "id": "kp_circle_inscribed",     "name": "圆周角定理",       "difficulty": 0.6, "description": "圆周角=同弧圆心角的一半" },
-        { "id": "kp_circle_diam",          "name": "直径所对的圆周角", "difficulty": 0.5, "description": "直径所对圆周角是直角及其逆定理" },
-        { "id": "kp_circle_inscribed_quad","name": "圆内接四边形",     "difficulty": 0.5, "description": "对角互补" },
-        { "id": "kp_circle_point_pos",     "name": "点与圆的位置关系", "difficulty": 0.3, "description": "d<r 圆内、d=r 圆上、d>r 圆外" },
-        { "id": "kp_circle_line_pos",      "name": "直线与圆的位置关系","difficulty": 0.4, "description": "d<r 相交、d=r 相切、d>r 相离" },
-        { "id": "kp_circle_tangent",       "name": "切线的判定与性质", "difficulty": 0.7, "description": "切线垂直于过切点的半径" },
-        { "id": "kp_circle_arc_length",    "name": "弧长公式",         "difficulty": 0.5, "description": "l=nπR/180" },
-        { "id": "kp_circle_sector",        "name": "扇形面积",         "difficulty": 0.5, "description": "S=nπR^2/360=½lR" },
-        { "id": "kp_circle_cone",          "name": "圆锥的侧面积",     "difficulty": 0.6, "description": "侧面展开图是扇形，S=πrl" }
+        {
+          "id": "kp_circle_def",
+          "name": "圆的定义与弦弧",
+          "difficulty": 0.3,
+          "description": "弦、弧、圆心角、圆周角的基本概念"
+        },
+        {
+          "id": "kp_circle_perp",
+          "name": "垂径定理",
+          "difficulty": 0.6,
+          "description": "垂直于弦的直径平分弦与弧"
+        },
+        {
+          "id": "kp_circle_central",
+          "name": "圆心角与弧弦关系",
+          "difficulty": 0.5,
+          "description": "等圆心角对等弧等弦"
+        },
+        {
+          "id": "kp_circle_inscribed",
+          "name": "圆周角定理",
+          "difficulty": 0.6,
+          "description": "圆周角=同弧圆心角的一半"
+        },
+        {
+          "id": "kp_circle_diam",
+          "name": "直径所对的圆周角",
+          "difficulty": 0.5,
+          "description": "直径所对圆周角是直角及其逆定理"
+        },
+        {
+          "id": "kp_circle_inscribed_quad",
+          "name": "圆内接四边形",
+          "difficulty": 0.5,
+          "description": "对角互补"
+        },
+        {
+          "id": "kp_circle_point_pos",
+          "name": "点与圆的位置关系",
+          "difficulty": 0.3,
+          "description": "d<r 圆内、d=r 圆上、d>r 圆外"
+        },
+        {
+          "id": "kp_circle_line_pos",
+          "name": "直线与圆的位置关系",
+          "difficulty": 0.4,
+          "description": "d<r 相交、d=r 相切、d>r 相离"
+        },
+        {
+          "id": "kp_circle_tangent",
+          "name": "切线的判定与性质",
+          "difficulty": 0.7,
+          "description": "切线垂直于过切点的半径"
+        },
+        {
+          "id": "kp_circle_arc_length",
+          "name": "弧长公式",
+          "difficulty": 0.5,
+          "description": "l=nπR/180"
+        },
+        {
+          "id": "kp_circle_sector",
+          "name": "扇形面积",
+          "difficulty": 0.5,
+          "description": "S=nπR^2/360=½lR"
+        },
+        {
+          "id": "kp_circle_cone",
+          "name": "圆锥的侧面积",
+          "difficulty": 0.6,
+          "description": "侧面展开图是扇形，S=πrl"
+        }
       ]
     },
     {
       "id": "ch_probability",
-      "name": "概率初步",
+      "name": "第25章 概率初步",
       "grade": "初三",
       "order": 5,
       "knowledge_points": [
-        { "id": "kp_prob_event",     "name": "随机事件",         "difficulty": 0.3, "description": "确定事件与随机事件的区分" },
-        { "id": "kp_prob_definition","name": "概率的定义",       "difficulty": 0.4, "description": "P(A)=m/n 的古典概型计算" },
-        { "id": "kp_prob_list",      "name": "列表法求概率",     "difficulty": 0.5, "description": "两步试验用表格列举所有等可能结果" },
-        { "id": "kp_prob_tree",      "name": "树状图求概率",     "difficulty": 0.5, "description": "两步及以上的试验用树状图列举" },
-        { "id": "kp_prob_frequency", "name": "用频率估计概率",   "difficulty": 0.5, "description": "大量重复试验中频率稳定于概率" }
+        {
+          "id": "kp_prob_event",
+          "name": "随机事件",
+          "difficulty": 0.3,
+          "description": "确定事件与随机事件的区分"
+        },
+        {
+          "id": "kp_prob_definition",
+          "name": "概率的定义",
+          "difficulty": 0.4,
+          "description": "P(A)=m/n 的古典概型计算"
+        },
+        {
+          "id": "kp_prob_list",
+          "name": "列表法求概率",
+          "difficulty": 0.5,
+          "description": "两步试验用表格列举所有等可能结果"
+        },
+        {
+          "id": "kp_prob_tree",
+          "name": "树状图求概率",
+          "difficulty": 0.5,
+          "description": "两步及以上的试验用树状图列举"
+        },
+        {
+          "id": "kp_prob_frequency",
+          "name": "用频率估计概率",
+          "difficulty": 0.5,
+          "description": "大量重复试验中频率稳定于概率"
+        }
       ]
     },
     {
       "id": "ch_inverse_func",
-      "name": "反比例函数",
+      "name": "第26章 反比例函数",
       "grade": "初三",
       "order": 6,
       "knowledge_points": [
-        { "id": "kp_inverse_def",    "name": "反比例函数的概念", "difficulty": 0.4, "description": "y=k/x (k≠0)" },
-        { "id": "kp_inverse_graph",  "name": "图象与性质",       "difficulty": 0.5, "description": "双曲线、k的正负与所在象限" },
-        { "id": "kp_inverse_k",      "name": "k的几何意义",      "difficulty": 0.6, "description": "矩形面积=|k|" },
-        { "id": "kp_inverse_apply",  "name": "反比例函数应用",   "difficulty": 0.6, "description": "压强、浓度等实际模型" }
+        {
+          "id": "kp_inverse_def",
+          "name": "反比例函数的概念",
+          "difficulty": 0.4,
+          "description": "y=k/x (k≠0)"
+        },
+        {
+          "id": "kp_inverse_graph",
+          "name": "图象与性质",
+          "difficulty": 0.5,
+          "description": "双曲线、k的正负与所在象限"
+        },
+        {
+          "id": "kp_inverse_k",
+          "name": "k的几何意义",
+          "difficulty": 0.6,
+          "description": "矩形面积=|k|"
+        },
+        {
+          "id": "kp_inverse_apply",
+          "name": "反比例函数应用",
+          "difficulty": 0.6,
+          "description": "压强、浓度等实际模型"
+        }
       ]
     },
     {
       "id": "ch_similarity",
-      "name": "相似",
+      "name": "第27章 相似",
       "grade": "初三",
       "order": 7,
       "knowledge_points": [
-        { "id": "kp_sim_ratio",      "name": "比例的性质",             "difficulty": 0.4, "description": "比例基本性质、黄金分割" },
-        { "id": "kp_sim_parallel",   "name": "平行线分线段成比例",     "difficulty": 0.5, "description": "A字形与8字形基本图形" },
-        { "id": "kp_sim_criteria",   "name": "相似三角形的判定",       "difficulty": 0.6, "description": "AA、SAS、SSS 三种判定" },
-        { "id": "kp_sim_properties", "name": "相似三角形的性质",       "difficulty": 0.6, "description": "对应边成比例、面积比=相似比平方" },
-        { "id": "kp_sim_homothety",  "name": "位似",                   "difficulty": 0.5, "description": "位似图形与坐标变换" }
+        {
+          "id": "kp_sim_ratio",
+          "name": "比例的性质",
+          "difficulty": 0.4,
+          "description": "比例基本性质、黄金分割"
+        },
+        {
+          "id": "kp_sim_parallel",
+          "name": "平行线分线段成比例",
+          "difficulty": 0.5,
+          "description": "A字形与8字形基本图形"
+        },
+        {
+          "id": "kp_sim_criteria",
+          "name": "相似三角形的判定",
+          "difficulty": 0.6,
+          "description": "AA、SAS、SSS 三种判定"
+        },
+        {
+          "id": "kp_sim_properties",
+          "name": "相似三角形的性质",
+          "difficulty": 0.6,
+          "description": "对应边成比例、面积比=相似比平方"
+        },
+        {
+          "id": "kp_sim_homothety",
+          "name": "位似",
+          "difficulty": 0.5,
+          "description": "位似图形与坐标变换"
+        }
       ]
     },
     {
       "id": "ch_trig",
-      "name": "锐角三角函数",
+      "name": "第28章 锐角三角函数",
       "grade": "初三",
       "order": 8,
       "knowledge_points": [
-        { "id": "kp_trig_defs",    "name": "正弦、余弦、正切", "difficulty": 0.5, "description": "直角三角形中边角关系的定义" },
-        { "id": "kp_trig_special", "name": "特殊角的三角值",   "difficulty": 0.4, "description": "30°/45°/60° 的三角函数值" },
-        { "id": "kp_trig_solve",   "name": "解直角三角形",     "difficulty": 0.6, "description": "已知两元素求其余元素" },
-        { "id": "kp_trig_apply",   "name": "三角函数应用",     "difficulty": 0.7, "description": "仰角俯角、坡度问题" }
+        {
+          "id": "kp_trig_defs",
+          "name": "正弦、余弦、正切",
+          "difficulty": 0.5,
+          "description": "直角三角形中边角关系的定义"
+        },
+        {
+          "id": "kp_trig_special",
+          "name": "特殊角的三角值",
+          "difficulty": 0.4,
+          "description": "30°/45°/60° 的三角函数值"
+        },
+        {
+          "id": "kp_trig_solve",
+          "name": "解直角三角形",
+          "difficulty": 0.6,
+          "description": "已知两元素求其余元素"
+        },
+        {
+          "id": "kp_trig_apply",
+          "name": "三角函数应用",
+          "difficulty": 0.7,
+          "description": "仰角俯角、坡度问题"
+        }
+      ]
+    },
+    {
+      "id": "ch_projection",
+      "name": "第29章 投影与视图",
+      "grade": "初三",
+      "order": 9,
+      "knowledge_points": [
+        {
+          "id": "kp_proj_center",
+          "name": "中心投影",
+          "difficulty": 0.4,
+          "description": "灯光下物体与影子的对应，光线交于一点"
+        },
+        {
+          "id": "kp_proj_parallel",
+          "name": "平行投影",
+          "difficulty": 0.4,
+          "description": "阳光下物体与影子的对应，光线互相平行"
+        },
+        {
+          "id": "kp_proj_three_view",
+          "name": "三视图",
+          "difficulty": 0.5,
+          "description": "主视图/俯视图/左视图及三者对应关系"
+        },
+        {
+          "id": "kp_proj_restore",
+          "name": "由三视图还原几何体",
+          "difficulty": 0.6,
+          "description": "由三视图想象还原空间几何体"
+        },
+        {
+          "id": "kp_proj_measure",
+          "name": "投影测高",
+          "difficulty": 0.7,
+          "description": "利用影长/标杆测物高（相似建模）"
+        }
       ]
     }
   ],
   "prerequisite_edges": [
-    { "from": "kp_power_ops",      "to": "kp_poly_mult" },
-    { "from": "kp_poly_mult",      "to": "kp_mul_formulas" },
-    { "from": "kp_mul_formulas",   "to": "kp_peifang" },
-    { "from": "kp_factor_common",  "to": "kp_yinshi" },
-    { "from": "kp_poly_mult",      "to": "kp_crossmult" },
-    { "from": "kp_crossmult",      "to": "kp_yinshi" },
-    { "from": "kp_qe_definition",  "to": "kp_qe_general_form" },
-    { "from": "kp_qe_general_form","to": "kp_direct_open" },
-    { "from": "kp_qe_general_form","to": "kp_peifang" },
-    { "from": "kp_qe_general_form","to": "kp_discriminant" },
-    { "from": "kp_qe_general_form","to": "kp_yinshi" },
-    { "from": "kp_direct_open",    "to": "kp_qe_root_check" },
-    { "from": "kp_peifang",        "to": "kp_gongshi" },
-    { "from": "kp_discriminant",   "to": "kp_gongshi" },
-    { "from": "kp_gongshi",        "to": "kp_vieta" },
-    { "from": "kp_discriminant",   "to": "kp_vieta" },
-    { "from": "kp_yinshi",         "to": "kp_qe_apply_select" },
-    { "from": "kp_gongshi",        "to": "kp_qe_apply_select" },
-    { "from": "kp_qe_general_form","to": "kp_qe_growth" },
-    { "from": "kp_qe_general_form","to": "kp_qe_area" },
-    { "from": "kp_qe_definition",  "to": "kp_func_definition" },
-    { "from": "kp_func_definition","to": "kp_func_vertex_form" },
-    { "from": "kp_func_vertex_form","to": "kp_func_axis" },
-    { "from": "kp_func_axis",      "to": "kp_func_graph" },
-    { "from": "kp_func_graph",     "to": "kp_func_increase" },
-    { "from": "kp_func_graph",     "to": "kp_func_abc" },
-    { "from": "kp_func_vertex_form","to": "kp_func_shift" },
-    { "from": "kp_func_graph",     "to": "kp_func_maxmin" },
-    { "from": "kp_func_definition","to": "kp_func_roots" },
-    { "from": "kp_discriminant",   "to": "kp_func_roots" },
-    { "from": "kp_func_vertex_form","to": "kp_func_undetermined" },
-    { "from": "kp_func_maxmin",    "to": "kp_func_apply" },
-    { "from": "kp_rot_properties", "to": "kp_rot_coord" },
-    { "from": "kp_rot_center",     "to": "kp_rot_figure" },
-    { "from": "kp_circle_def",     "to": "kp_circle_perp" },
-    { "from": "kp_circle_def",     "to": "kp_circle_central" },
-    { "from": "kp_circle_def",     "to": "kp_circle_point_pos" },
-    { "from": "kp_circle_central", "to": "kp_circle_inscribed" },
-    { "from": "kp_circle_inscribed","to": "kp_circle_diam" },
-    { "from": "kp_circle_inscribed","to": "kp_circle_inscribed_quad" },
-    { "from": "kp_circle_point_pos","to": "kp_circle_line_pos" },
-    { "from": "kp_circle_line_pos","to": "kp_circle_tangent" },
-    { "from": "kp_circle_def",     "to": "kp_circle_arc_length" },
-    { "from": "kp_circle_arc_length","to": "kp_circle_sector" },
-    { "from": "kp_circle_sector",  "to": "kp_circle_cone" },
-    { "from": "kp_prob_event",     "to": "kp_prob_definition" },
-    { "from": "kp_prob_definition","to": "kp_prob_list" },
-    { "from": "kp_prob_definition","to": "kp_prob_tree" },
-    { "from": "kp_prob_definition","to": "kp_prob_frequency" },
-    { "from": "kp_func_definition","to": "kp_inverse_def" },
-    { "from": "kp_inverse_def",    "to": "kp_inverse_graph" },
-    { "from": "kp_inverse_graph",  "to": "kp_inverse_k" },
-    { "from": "kp_inverse_graph",  "to": "kp_inverse_apply" },
-    { "from": "kp_sim_ratio",      "to": "kp_sim_parallel" },
-    { "from": "kp_sim_parallel",   "to": "kp_sim_criteria" },
-    { "from": "kp_sim_criteria",   "to": "kp_sim_properties" },
-    { "from": "kp_sim_criteria",   "to": "kp_sim_homothety" },
-    { "from": "kp_trig_defs",      "to": "kp_trig_special" },
-    { "from": "kp_trig_defs",      "to": "kp_trig_solve" },
-    { "from": "kp_trig_solve",     "to": "kp_trig_apply" },
-    { "from": "kp_sim_properties", "to": "kp_trig_solve" }
+    {
+      "from": "kp_crossmult",
+      "to": "kp_yinshi"
+    },
+    {
+      "from": "kp_qe_definition",
+      "to": "kp_qe_general_form"
+    },
+    {
+      "from": "kp_qe_general_form",
+      "to": "kp_direct_open"
+    },
+    {
+      "from": "kp_qe_general_form",
+      "to": "kp_peifang"
+    },
+    {
+      "from": "kp_qe_general_form",
+      "to": "kp_discriminant"
+    },
+    {
+      "from": "kp_qe_general_form",
+      "to": "kp_yinshi"
+    },
+    {
+      "from": "kp_direct_open",
+      "to": "kp_qe_root_check"
+    },
+    {
+      "from": "kp_peifang",
+      "to": "kp_gongshi"
+    },
+    {
+      "from": "kp_discriminant",
+      "to": "kp_gongshi"
+    },
+    {
+      "from": "kp_gongshi",
+      "to": "kp_vieta"
+    },
+    {
+      "from": "kp_discriminant",
+      "to": "kp_vieta"
+    },
+    {
+      "from": "kp_yinshi",
+      "to": "kp_qe_apply_select"
+    },
+    {
+      "from": "kp_gongshi",
+      "to": "kp_qe_apply_select"
+    },
+    {
+      "from": "kp_qe_general_form",
+      "to": "kp_qe_growth"
+    },
+    {
+      "from": "kp_qe_general_form",
+      "to": "kp_qe_area"
+    },
+    {
+      "from": "kp_qe_definition",
+      "to": "kp_func_definition"
+    },
+    {
+      "from": "kp_func_definition",
+      "to": "kp_func_vertex_form"
+    },
+    {
+      "from": "kp_func_vertex_form",
+      "to": "kp_func_axis"
+    },
+    {
+      "from": "kp_func_axis",
+      "to": "kp_func_graph"
+    },
+    {
+      "from": "kp_func_graph",
+      "to": "kp_func_increase"
+    },
+    {
+      "from": "kp_func_graph",
+      "to": "kp_func_abc"
+    },
+    {
+      "from": "kp_func_vertex_form",
+      "to": "kp_func_shift"
+    },
+    {
+      "from": "kp_func_graph",
+      "to": "kp_func_maxmin"
+    },
+    {
+      "from": "kp_func_definition",
+      "to": "kp_func_roots"
+    },
+    {
+      "from": "kp_discriminant",
+      "to": "kp_func_roots"
+    },
+    {
+      "from": "kp_func_vertex_form",
+      "to": "kp_func_undetermined"
+    },
+    {
+      "from": "kp_func_maxmin",
+      "to": "kp_func_apply"
+    },
+    {
+      "from": "kp_rot_properties",
+      "to": "kp_rot_coord"
+    },
+    {
+      "from": "kp_rot_center",
+      "to": "kp_rot_figure"
+    },
+    {
+      "from": "kp_circle_def",
+      "to": "kp_circle_perp"
+    },
+    {
+      "from": "kp_circle_def",
+      "to": "kp_circle_central"
+    },
+    {
+      "from": "kp_circle_def",
+      "to": "kp_circle_point_pos"
+    },
+    {
+      "from": "kp_circle_central",
+      "to": "kp_circle_inscribed"
+    },
+    {
+      "from": "kp_circle_inscribed",
+      "to": "kp_circle_diam"
+    },
+    {
+      "from": "kp_circle_inscribed",
+      "to": "kp_circle_inscribed_quad"
+    },
+    {
+      "from": "kp_circle_point_pos",
+      "to": "kp_circle_line_pos"
+    },
+    {
+      "from": "kp_circle_line_pos",
+      "to": "kp_circle_tangent"
+    },
+    {
+      "from": "kp_circle_def",
+      "to": "kp_circle_arc_length"
+    },
+    {
+      "from": "kp_circle_arc_length",
+      "to": "kp_circle_sector"
+    },
+    {
+      "from": "kp_circle_sector",
+      "to": "kp_circle_cone"
+    },
+    {
+      "from": "kp_prob_event",
+      "to": "kp_prob_definition"
+    },
+    {
+      "from": "kp_prob_definition",
+      "to": "kp_prob_list"
+    },
+    {
+      "from": "kp_prob_definition",
+      "to": "kp_prob_tree"
+    },
+    {
+      "from": "kp_prob_definition",
+      "to": "kp_prob_frequency"
+    },
+    {
+      "from": "kp_func_definition",
+      "to": "kp_inverse_def"
+    },
+    {
+      "from": "kp_inverse_def",
+      "to": "kp_inverse_graph"
+    },
+    {
+      "from": "kp_inverse_graph",
+      "to": "kp_inverse_k"
+    },
+    {
+      "from": "kp_inverse_graph",
+      "to": "kp_inverse_apply"
+    },
+    {
+      "from": "kp_sim_ratio",
+      "to": "kp_sim_parallel"
+    },
+    {
+      "from": "kp_sim_parallel",
+      "to": "kp_sim_criteria"
+    },
+    {
+      "from": "kp_sim_criteria",
+      "to": "kp_sim_properties"
+    },
+    {
+      "from": "kp_sim_criteria",
+      "to": "kp_sim_homothety"
+    },
+    {
+      "from": "kp_trig_defs",
+      "to": "kp_trig_special"
+    },
+    {
+      "from": "kp_trig_defs",
+      "to": "kp_trig_solve"
+    },
+    {
+      "from": "kp_trig_solve",
+      "to": "kp_trig_apply"
+    },
+    {
+      "from": "kp_sim_properties",
+      "to": "kp_trig_solve"
+    },
+    {
+      "from": "kp_proj_center",
+      "to": "kp_proj_measure"
+    },
+    {
+      "from": "kp_proj_parallel",
+      "to": "kp_proj_three_view"
+    },
+    {
+      "from": "kp_proj_parallel",
+      "to": "kp_proj_measure"
+    },
+    {
+      "from": "kp_proj_three_view",
+      "to": "kp_proj_restore"
+    }
   ]
 }

@@ -26,9 +26,9 @@ M5-T1/T2 · 老师端端点组：布置作业 / 触发批改 / 🔴 主观题确
 from functools import lru_cache
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from langgraph.types import Command
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import (
@@ -40,6 +40,7 @@ from app.core.deps import (
 )
 from app.db.session import get_db
 from app.models import (
+    Chapter,
     Class,
     ErrorLog,
     Homework,
@@ -109,14 +110,17 @@ def homework_create(body: HomeworkCreateIn, user: CurrentUser = Depends(get_curr
                     scopes: list[dict] = Depends(get_scopes), db: Session = Depends(get_db)):
     """按知识点抽题布置作业。
 
-    得到的数据：class_id / title / kp_ids / per_kp / score
+    得到的数据：
+        class_id / title / kp_ids / per_kp / score
+
     要做的操作：
       t1 越权校验：这个班必须在我任教范围内
       t2 selection_engine.fetch_candidates_by_kp 备料 → select_quiz_questions 抽题
          （target_points 伪装成 p_known=0.5 → 全 medium 档；作业不是诊断测验，取中档）
       t3 一个事务写 homeworks + homework_questions，审计埋点
-    为什么复用 S-10 的抽题函数：同一套"单点 ≤2、缺口不乱补"的确定性规则，
-    老师布置的作业也能做到"重跑同题"，家长问起来说得清。
+
+    为什么复用 S-10 的抽题函数：
+        同一套"单点 ≤2、缺口不乱补"的确定性规则，老师布置的作业也能做到"重跑同题"，家长问起来说得清。
     """
     _ensure_class_in_scope(scopes, user, body.class_id)
 
@@ -148,30 +152,93 @@ def homework_create(body: HomeworkCreateIn, user: CurrentUser = Depends(get_curr
     return {"homework_id": hw.id, "question_ids": [q["id"] for q in picked], "gaps": gaps}
 
 
-@router.get("/homework/{homework_id}/submissions")
-def homework_submissions(homework_id: int, user: CurrentUser = Depends(get_current_user),
+def _resolve_homework(db: Session, ref: str) -> Homework | None:
+    """作业 id 或作业名 → 作业行。
+
+    得到的数据：
+        ref（字符串，作业 id 如 "12"，或作业名如 "随堂作业"）。
+
+    要做的操作：
+        纯数字按 id 精确查；
+        否则按 title 模糊查（ilike），重名取 id 最大的一条。
+
+    返回：
+        Homework 行；
+        查不到返回 None。
+
+    为什么：老师手上通常只有作业名，强制先查 id 会多一步事。
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    
+    if ref.isdigit():
+        return db.get(Homework, int(ref))
+    
+    return db.execute(
+        select(Homework).where(Homework.title.ilike(f"%{ref}%"))
+        .order_by(Homework.id.desc()).limit(1)
+    ).scalar_one_or_none()
+
+
+@router.get("/homework/{homework_ref}/submissions")
+def homework_submissions(homework_ref: str,
+                         page: int = Query(default=1, ge=1),
+                         size: int = Query(default=20, ge=1, le=100),
+                         user: CurrentUser = Depends(get_current_user),
                          scopes: list[dict] = Depends(get_scopes), db: Session = Depends(get_db)):
-    """该作业全班作答情况（老师只看自己班）。"""
-    hw = db.get(Homework, homework_id)
+    """某份作业的全班作答情况（老师只看自己班），按页返回。
+
+    得到的数据：
+        homework_ref（作业 id 或作业名）、
+        page（页码）、
+        size（每页条数，默认 20）；
+        作业行由 _resolve_homework 解析，班级归属由 _ensure_class_in_scope 校验。
+
+    要做的操作：
+        按 (source_type='homework', source_id=作业 id) 统计总数，
+        再左连 students/users/questions 取学号、姓名、题干，按学生-题目顺序切出一页。
+
+    返回：
+        {"total": 100, "page": 1, "size": 20,
+         "homework": {"id": 4, "title": "演示历史作业", "class_id": 2},
+         "items": [{"answer_id": 1, "student": "演示学生01(20260066)", ...}]}
+
+    为什么：一份作业 20 人 × 5 题就有 100 条作答，全量拉走没必要，所以按页取。
+    """
+    hw = _resolve_homework(db, homework_ref)
+
     if hw is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="作业不存在")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"找不到作业：{homework_ref}")
     _ensure_class_in_scope(scopes, user, hw.class_id)
 
+    where = [
+        StudentAnswer.source_type == "homework",
+        StudentAnswer.source_id == hw.id,
+    ]
+    total = db.execute(
+        select(func.count()).select_from(StudentAnswer).where(*where)
+    ).scalar_one()
     rows = db.execute(
         select(StudentAnswer, Student.student_no, User.name, Question.content)
         .join(Student, Student.id == StudentAnswer.student_id)
         .join(User, User.id == Student.user_id)
         .join(Question, Question.id == StudentAnswer.question_id)
-        .where(StudentAnswer.source_type == "homework")
-        .where(StudentAnswer.source_id == homework_id)
+        .where(*where)
         .order_by(StudentAnswer.student_id, StudentAnswer.question_id)
+        .offset((page - 1) * size).limit(size)
     ).all()
-    return [
-        {"answer_id": a.id, "student": f"{name}({no or '-'})", "question": content[:40],
-         "content": a.content, "is_correct": a.is_correct, "score": a.score,
-         "submitted_at": str(a.submitted_at)}
-        for a, no, name, content in rows
-    ]
+    
+    return {
+        "total": total, "page": page, "size": size,
+        "homework": {"id": hw.id, "title": hw.title, "class_id": hw.class_id},
+        "items": [
+            {"answer_id": a.id, "student": f"{name}({no or '-'})", "question": content[:40],
+             "content": a.content, "is_correct": a.is_correct, "score": a.score,
+             "submitted_at": str(a.submitted_at)}
+            for a, no, name, content in rows
+        ],
+    }
 
 
 # =====================================================================
@@ -354,6 +421,105 @@ def class_mastery(class_id: int, user: CurrentUser = Depends(get_current_user),
     from app.tools.graph_tools import query_class_mastery
 
     return json.loads(query_class_mastery.invoke({"class_id": class_id}))
+
+
+
+@router.get("/homeworks")
+def list_homeworks(page: int = Query(default=1, ge=1),
+                   size: int = Query(default=10, ge=1, le=50),
+                   user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """我布置的作业清单（时间倒序 + 分页），给新建作业页右侧「已布置作业」列表用。
+
+    得到的数据：
+        page（页码，从 1 起）、
+        size（每页条数，默认 10）、
+        keyword（作业名模糊搜，可空）；
+        teacher 只看自己布置的，admin 看全部。
+
+    要做的操作：
+        homeworks 左连 classes 取班级名，按 id 倒序分页；
+        批量统计每份作业的题数（homework_questions 行数）与已交人数
+        （student_answers 中 source_type='homework' 的 distinct student_id 数）。
+
+    返回：
+        {"total": 12, "page": 1, "size": 10,
+         "items": [{"id": 4, "title": "随堂作业", "class_name": "初二1班",
+                    "question_count": 5, "submitted": 20, "created_at": "2026-10-24 14:53:11"}]}
+
+    为什么：老师要一眼看出"布置了但没人交"，所以每行都带题数与已交人数。
+    """
+    stmt = select(Homework, Class.grade, Class.name).join(Class, Class.id == Homework.class_id)
+    count_stmt = select(func.count()).select_from(Homework)
+    if "admin" not in user.roles:
+        stmt = stmt.where(Homework.teacher_id == user.id)
+        count_stmt = count_stmt.where(Homework.teacher_id == user.id)
+
+    total = db.execute(count_stmt).scalar_one()
+    rows = db.execute(stmt.order_by(Homework.id.desc())
+                      .offset((page - 1) * size).limit(size)).all()
+    ids = [hw.id for hw, _, _ in rows]
+
+    q_counts: dict[int, int] = {}
+    sub_counts: dict[int, int] = {}
+    if ids:
+        q_counts = dict(db.execute(
+            select(HomeworkQuestion.homework_id, func.count(HomeworkQuestion.id))
+            .where(HomeworkQuestion.homework_id.in_(ids))
+            .group_by(HomeworkQuestion.homework_id)).all())
+        sub_counts = dict(db.execute(
+            # 去重学生数（不是作答条数）：一份作业 5 题 × 20 人 = 100 条作答，
+            # 但"已交"说的是几个人交了 → count(distinct student_id)
+            select(StudentAnswer.source_id,
+                   func.count(func.distinct(StudentAnswer.student_id)))
+            .where(StudentAnswer.source_type == "homework",
+                   StudentAnswer.source_id.in_(ids))
+            .group_by(StudentAnswer.source_id)).all())
+
+    return {"total": total, "page": page, "size": size,
+            "items": [{"id": hw.id, "title": hw.title,
+                       "class_name": f"{grade}{name}",
+                       "question_count": q_counts.get(hw.id, 0),
+                       "submitted": sub_counts.get(hw.id, 0),
+                       "created_at": str(hw.created_at)} for hw, grade, name in rows]}
+
+
+@router.get("/knowledge-points")
+def list_knowledge_points(db: Session = Depends(get_db)):
+    """知识点清单：全量知识点 + 每个知识点在题库里的可抽题量。
+
+    得到的数据：
+        PG 的 knowledge_points（全量 63 个）与 questions（题量来源）；
+        无入参。
+
+    要做的操作：
+        knowledge_points 左连 chapters、右连 questions 聚合，
+        用 CASE 条件计数剔除 quality_flag='disabled' 的题（与抽题引擎口径一致）。
+
+    返回：
+        [{"id": "kp_crossmult", "name": "十字相乘法",
+          "chapter_name": "第21章 一元二次方程", "question_count": 8}, ...]
+
+    为什么：知识点与题库都是 seed 灌进来的数据，前端自己硬一份清单必然和库对不上。
+    """
+    rows = db.execute(
+        select(
+            KnowledgePoint.id,
+            KnowledgePoint.name,
+            KnowledgePoint.chapter_id,
+            Chapter.name,
+            # 用 CASE 累加而不是 where 过滤：LEFT JOIN 保住"0 题的知识点"（老师要看得到缺口）
+            func.coalesce(
+                func.sum(case((Question.quality_flag != "disabled", 1), else_=0)), 0
+            ),
+        )
+        .outerjoin(Chapter, Chapter.id == KnowledgePoint.chapter_id)
+        .outerjoin(Question, Question.kp_id == KnowledgePoint.id)
+        .group_by(KnowledgePoint.id, KnowledgePoint.name, KnowledgePoint.chapter_id,
+                  Chapter.name, Chapter.order)
+        .order_by(Chapter.order, KnowledgePoint.id)
+    ).all()
+    return [{"id": kp_id, "name": name, "chapter_id": ch_id, "chapter_name": ch_name,
+             "question_count": cnt} for kp_id, name, ch_id, ch_name, cnt in rows]
 
 
 

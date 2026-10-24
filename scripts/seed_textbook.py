@@ -57,6 +57,11 @@ def main() -> None:
         print("[WARN] data/raw/ 下没有 PDF。开发期可加 --demo 用内置演示文本先跑通链路")
         sys.exit(0)
 
+    # 落盘：Milvus insert 只进内存缓冲（growing segment），检索能命中但统计=0、
+    #   重启可能丢——必须 flush 一次才真正持久化（与 seed_question_bank 结尾同款）
+    client.flush(settings.collection_textbook)
+    print(f"[OK] textbook_math 已 flush 落盘")
+
     # 自检：分别用 student / teacher 角色检索，验证可见性与溯源
     for role in ("student", "teacher"):
         hits = retrieve(client, "一元二次方程有哪些解法", role=role, top_k=2)

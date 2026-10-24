@@ -33,6 +33,9 @@ dependencies = [
     "dashscope>=1.27.7",
     "sentence-transformers>=6.1.0",
     "langchain-openai>=1.7.2",
+    "pypdf>=6.21.2",
+    "fonttools>=4.67.0",
+    "pypdfium2>=5.14.0",
 ]
 
 [dependency-groups]

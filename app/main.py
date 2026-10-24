@@ -2,12 +2,12 @@
 # M5 · FastAPI 入口：五组路由挂载 + CORS + 启动预热。
 #
 # 【启动方式】（开发计划 M5 完成判据，注意不加 --reload）
-#   uv run uvicorn app.main:app --port 8000
+#   uv run uvicorn app.main:app --port 8100
 #
 #   为什么不加 --reload：会话在 PG 不会丢，但热重载会重启进程 →
 #   ① 正在进行的 SSE 流被掐断；② 多 worker 抢连接池 / 重复 setup()。
 #
-# 【OpenAPI 文档】启动后开 http://localhost:8000/docs 可视化调试全部端点——
+# 【OpenAPI 文档】启动后开 http://localhost:8100/docs 可视化调试全部端点——
 #   这是 FastAPI 自带的调试福利，比 curl 快。
 from contextlib import asynccontextmanager
 

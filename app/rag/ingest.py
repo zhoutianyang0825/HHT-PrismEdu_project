@@ -206,15 +206,44 @@ def ingest_textbook_pages(client: MilvusClient, pages: list[tuple[str, int]],
 
 
 def ingest_textbook_pdf(client: MilvusClient, pdf_path: Path) -> int:
-    """PDF 教材：pypdf 提取各页文本后交给 ingest_textbook_pages。"""
-    from pypdf import PdfReader
+    """PDF 教材：逐页提取文本后交给 ingest_textbook_pages。
 
-    reader = PdfReader(str(pdf_path))
-    pages = []
-    for page_no, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
-        if text:
-            pages.append((text, page_no))
+    【为什么首选 pypdfium2 而不是 pypdf】
+      pypdf 对部分 CFF 字体教材会崩：Widths 表里存的是 IndirectObject，
+      get_text_width 求和时 float + IndirectObject 直接 TypeError
+      （2026-10-23 人教版九上数学实测踩坑，装 fontTools 也救不了）。
+      pypdfium2 背后是 pdfium 引擎，字体兼容性强，同类教材提取稳定。
+      pypdfium2 不可用时退回 pypdf，并逐页 try/except——个别坏页跳过，不炸整本书。
+    """
+    pages: list[tuple[str, int]] = []
+    failed = 0
+
+    try:
+        import pypdfium2 as pdfium
+
+        doc = pdfium.PdfDocument(str(pdf_path))
+        try:
+            for page_no in range(len(doc)):
+                text = (doc[page_no].get_textpage().get_text_bounded() or "").strip()
+                if text:
+                    pages.append((text, page_no + 1))
+        finally:
+            doc.close()
+    except ImportError:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(pdf_path))
+        for page_no, page in enumerate(reader.pages, start=1):
+            try:
+                text = (page.extract_text() or "").strip()
+            except Exception:          # noqa: BLE001 坏页跳过，不让一本书全军覆没
+                failed += 1
+                continue
+            if text:
+                pages.append((text, page_no))
+
+    if failed:
+        print(f"[warn] {pdf_path.name}：{failed} 页文本提取失败已跳过（pypdf 字体表异常）")
     return ingest_textbook_pages(client, pages, source_name=pdf_path.name)
 
 

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HHT 棱镜课堂 · PrismEdu</title>
+  <meta name="description" content="以知识点掌握度为状态中枢的学情驱动自适应学习系统" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230071e3'/%3E%3Cpath d='M16 7l7 12H9z' fill='%23fff'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="./assets/apple.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+  <div id="modal-root"></div>
+
+  <!-- 启动兜底：模块因网络抖动没加载起来时，给出可刷新的提示，而不是一片白屏 -->
+  <script>
+    window.__errs = [];
+    window.addEventListener("error", function (e) {
+      window.__errs.push(String((e && e.message) || e));
+    });
+    setTimeout(function () {
+      var app = document.getElementById("app");
+      if (!app || app.childElementCount) return;
+      app.innerHTML =
+        '<div class="auth"><div class="auth-card" style="text-align:center">' +
+        '<h1 style="font-size:22px;letter-spacing:-.02em;margin:0 0 10px">页面没能加载完整</h1>' +
+        '<p style="color:#6e6e73;font-size:14px;line-height:1.6;margin:0 0 22px">' +
+        '可能是网络中断或服务刚重启。刷新一次通常就好了。</p>' +
+        '<button class="btn btn-primary" onclick="location.reload()">重新加载</button>' +
+        '</div></div>';
+    }, 5000);
+  </script>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

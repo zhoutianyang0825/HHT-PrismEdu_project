@@ -1,16 +1,4 @@
 subject,chapter_id,kp_id,question_type,difficulty,content,answer,options,analysis,source,quality_flag
-math,ch_algebra_basis,kp_power_ops,choice,easy,计算 a^3·a^2 的结果是（　）,A,"[""A. a^5"", ""B. a^6"", ""C. a^9"", ""D. 2a^5""]",同底数幂相乘，底数不变指数相加：a^(3+2)=a^5。,人教版初中数学,normal
-math,ch_algebra_basis,kp_power_ops,choice,easy,计算 (a^3)^2 的结果是（　）,B,"[""A. a^5"", ""B. a^6"", ""C. a^9"", ""D. a^8""]",幂的乘方，底数不变指数相乘：a^(3×2)=a^6。,人教版初中数学,normal
-math,ch_algebra_basis,kp_power_ops,fill,easy,计算：(-2a^2b)^3 = ______,-8a^6b^3,,积的乘方：(-2)^3·(a^2)^3·b^3=-8a^6b^3。,人教版初中数学,normal
-math,ch_algebra_basis,kp_poly_mult,fill,easy,计算：2x(3x-1) = ______,6x^2-2x,,分配律：2x·3x=6x^2，2x·(-1)=-2x。,人教版初中数学,normal
-math,ch_algebra_basis,kp_poly_mult,choice,easy,下列计算正确的是（　）,C,"[""A. (x+1)(x-1)=x^2+1"", ""B. (x+2)^2=x^2+4"", ""C. (x-3)(x+3)=x^2-9"", ""D. (x-1)^2=x^2-1""]",平方差公式：(x-3)(x+3)=x^2-9；其余三项均漏中间项或符号错。,人教版初中数学,normal
-math,ch_algebra_basis,kp_poly_mult,subjective,medium,计算：(2x-1)(x+3)。,2x^2+5x-3,,多项式乘多项式：2x·x+2x·3-1·x-3=2x^2+5x-3。,人教版初中数学,normal
-math,ch_algebra_basis,kp_mul_formulas,choice,medium,计算 (2x-3y)^2 的结果是（　）,C,"[""A. 4x^2-9y^2"", ""B. 4x^2+9y^2"", ""C. 4x^2-12xy+9y^2"", ""D. 4x^2-6xy+9y^2""]",完全平方公式 (a-b)^2=a^2-2ab+b^2：(2x)^2-2·2x·3y+(3y)^2=4x^2-12xy+9y^2。,人教版初中数学,normal
-math,ch_algebra_basis,kp_mul_formulas,fill,easy,计算：102×98 = ______（用平方差公式）,9996,,102×98=(100+2)(100-2)=100^2-2^2=10000-4=9996。,人教版初中数学,normal
-math,ch_algebra_basis,kp_mul_formulas,subjective,medium,先化简再求值：(x+2)^2-(x-1)(x+1)，其中 x=1.5。,4x+5；x=1.5 时值为 11,,(x^2+4x+4)-(x^2-1)=4x+5；x=1.5 时 4×1.5+5=11。,人教版初中数学,normal
-math,ch_algebra_basis,kp_factor_common,subjective,easy,因式分解：3a^2+6a。,3a(a+2),,公因式是 3a，提出后剩 (a+2)。,人教版初中数学,normal
-math,ch_algebra_basis,kp_factor_common,subjective,easy,因式分解：-4x^2y+8xy^2。,-4xy(x-2y),,公因式 -4xy：-4xy·x=-4x^2y，-4xy·(-2y)=8xy^2。,人教版初中数学,normal
-math,ch_algebra_basis,kp_factor_common,subjective,medium,因式分解：2a^2(b-3)-a(b-3)。,a(b-3)(2a-1),,把 (b-3) 看作整体：公因式 a(b-3)，提出后剩 (2a-1)。,人教版初中数学,normal
 math,ch_quadratic,kp_qe_definition,choice,easy,下列方程中，是一元二次方程的是（　）,C,"[""A. 2x+1=0"", ""B. x^2+y=1"", ""C. x^2-3x+2=0"", ""D. x^3=8""]",一元二次方程：一个未知数、最高次 2、整式方程。A 一元一次，B 二元，C ✓，D 三次。,人教版初中数学,normal
 math,ch_quadratic,kp_qe_definition,choice,medium,若方程 (m-1)x^2+2x-1=0 是关于 x 的一元二次方程，则 m 的取值范围是（　）,B,"[""A. m≠0"", ""B. m≠1"", ""C. m≥1"", ""D. m 为任意实数""]",二次项系数不能为 0：m-1≠0，即 m≠1。,人教版初中数学,normal
 math,ch_quadratic,kp_qe_definition,fill,easy,方程 3x(x-1)=2x^2-5 化成一般形式后，二次项系数为 ______,1,,展开：3x^2-3x=2x^2-5 → x^2-3x+5=0，二次项系数 1。,人教版初中数学,normal
@@ -184,3 +172,48 @@ math,ch_trig,kp_trig_solve,subjective,medium,Rt△ABC 中 ∠C=90°，∠A=30°�
 math,ch_trig,kp_trig_solve,fill,hard,Rt△ABC 中 ∠C=90°，tanA=3/4，斜边 c=10，则 a = ______，b = ______。,a=6，b=8,,tanA=a/b=3/4 → 设 a=3k、b=4k，勾股 9k²+16k²=100 → k=2 → a=6、b=8。知道 tan 就用比例设元。,人教版初中数学,normal
 math,ch_trig,kp_trig_apply,subjective,hard,小明在楼顶 A 处测得对面楼底 B 的俯角为 30°，两楼水平距离 24m，求 A 相对 B 的高度（保留根号）。,8√3 m,,俯角 30° → tan30°=h/24 → h=24×(√3/3)=8√3≈13.9m。仰俯角问题：先画水平线再找角。,人教版初中数学,normal
 math,ch_trig,kp_trig_apply,subjective,hard,一段斜坡坡比 i=1:2.4（垂直:水平），坡面长 13m，求坡的垂直高度。,5m,,设高 h、水平 2.4h：h²+(2.4h)²=13² → 6.76h²=169 → h=5。坡比=垂直:水平，别与坡角混淆。,人教版初中数学,normal
+math,ch_projection,kp_proj_center,choice,easy,夜晚路灯下，人在地面上的影子属于（　）,B,"[""A. 平行投影"", ""B. 中心投影"", ""C. 正投影"", ""D. 斜投影""]",灯光发出的光线交于一点（灯泡），物体上各点与光源连线形成的投影是中心投影。,人教版初中数学,normal
+math,ch_projection,kp_proj_center,fill,easy,路灯下，身高1.6m的小明影长2m，同一位置路灯下旗杆影长15m，则旗杆高____m。,12,,中心投影下同一时刻物高与影长成比例：1.6/2=h/15，解得 h=12。,人教版初中数学,normal
+math,ch_projection,kp_proj_parallel,choice,easy,晴天阳光下，人在地面上的影子属于（　）,A,"[""A. 平行投影"", ""B. 中心投影"", ""C. 以上都不是"", ""D. 无法确定""]",太阳光可看作平行光线，因此阳光下的影子是平行投影。,人教版初中数学,normal
+math,ch_projection,kp_proj_parallel,fill,easy,同一时刻阳光下，1.5m的竹竿影长1m，某棵树的影长8m，则树高____m。,12,,平行投影下物高与影长成比例：1.5/1=h/8，解得 h=12。,人教版初中数学,normal
+math,ch_projection,kp_proj_parallel,fill,medium,"一天中，正午时竖直木杆的影长最____（填""长""或""短""）。",短,,正午太阳高度角最大，平行投影下影长最短。,人教版初中数学,normal
+math,ch_projection,kp_proj_three_view,choice,easy,三视图是指（　）,C,"[""A. 主视图、右视图、俯视图"", ""B. 正视图、侧视图、仰视图"", ""C. 主视图、俯视图、左视图"", ""D. 主视图、后视图、俯视图""]",三视图固定指主视图（从正面看）、俯视图（从上面看）、左视图（从左面看）。,人教版初中数学,normal
+math,ch_projection,kp_proj_three_view,choice,medium,圆柱的三视图是（　）,B,"[""A. 三个矩形"", ""B. 两个矩形、一个圆"", ""C. 两个圆、一个矩形"", ""D. 三个圆""]",圆柱主视图与左视图都是矩形，俯视图是圆。,人教版初中数学,normal
+math,ch_projection,kp_proj_three_view,fill,medium,主视图反映物体的长和____，俯视图反映物体的长和宽。,高,,三视图对应关系口诀：主视俯视长对正，主视左视高平齐，俯视左视宽相等。,人教版初中数学,normal
+math,ch_projection,kp_proj_three_view,fill,medium,一个几何体的三视图均为正方形，则该几何体是____。,正方体,,正方体从正面、上面、左面看都是正方形；圆柱俯视是圆，球三视图都是圆。,人教版初中数学,normal
+math,ch_projection,kp_proj_restore,choice,medium,某几何体的主视图与左视图都是三角形，俯视图是带圆心的圆，则该几何体是（　）,B,"[""A. 圆柱"", ""B. 圆锥"", ""C. 球"", ""D. 三棱锥""]",俯视带圆心的圆说明底面是圆且顶点投影在圆心，主/左视为三角形 → 圆锥。,人教版初中数学,normal
+math,ch_projection,kp_proj_restore,choice,medium,某几何体的俯视图是三角形，主视图和左视图都是矩形，则该几何体是（　）,A,"[""A. 三棱柱"", ""B. 三棱锥"", ""C. 四棱柱"", ""D. 圆柱""]",俯视图反映底面形状：三角形底 + 侧面矩形 → 三棱柱。,人教版初中数学,normal
+math,ch_projection,kp_proj_restore,fill,medium,一个几何体的主视图与左视图均为矩形、俯视图为圆，则该几何体是____。,圆柱,,俯视圆、侧视矩形是圆柱的典型三视图组合。,人教版初中数学,normal
+math,ch_projection,kp_proj_measure,fill,medium,同一时刻阳光下，身高1.6m的小明影长2.4m，教学楼影长18m，则教学楼高____m。,12,,平行投影成比例：1.6/2.4=h/18，解得 h=12。,人教版初中数学,normal
+math,ch_projection,kp_proj_measure,subjective,hard,为测量古塔高度，立一根1.5m的标杆，同一时刻标杆影长1m，古塔影长15m（影子末端到塔基），求古塔的高度。,古塔高22.5m。设塔高 h m，由平行投影成比例：h/15=1.5/1，解得 h=22.5。,,平行投影测高的标准建模：物高/影长=标杆高/标杆影长。,人教版初中数学,normal
+math,ch_projection,kp_proj_measure,fill,hard,路灯下，身高1.6m的小明影长2m，小明距灯杆底部3m，则路灯高____m。,4,,中心投影相似建模：灯高/人高=(人距灯+影长)/影长，H/1.6=(3+2)/2，H=4。,人教版初中数学,normal
+math,ch_rotation,kp_rot_properties,fill,easy,旋转前后的两个图形____（填关系）。,全等,,旋转是全等变换：只改变位置，不改变形状和大小。,人教版初中数学,normal
+math,ch_rotation,kp_rot_properties,choice,easy,确定一个旋转运动需要的三要素是（　）,A,"[""A. 旋转中心、旋转方向、旋转角"", ""B. 旋转中心、平移方向、旋转角"", ""C. 对称轴、旋转方向、旋转角"", ""D. 旋转中心、旋转方向、对称轴""]",旋转三要素：绕哪个点（中心）、往哪转（方向）、转多少（角度）。,人教版初中数学,normal
+math,ch_rotation,kp_rot_coord,fill,medium,"点 A(3,0) 绕原点逆时针旋转 90° 得到点 A'，则 A' 的坐标是____。","(0,3)",,"逆时针 90°：(x,y)→(-y,x)，(3,0)→(0,3)。",人教版初中数学,normal
+math,ch_rotation,kp_rot_coord,fill,medium,"点 B(1,2) 绕原点顺时针旋转 90° 得到点 B'，则 B' 的坐标是____。","(2,-1)",,"顺时针 90°：(x,y)→(y,-x)，(1,2)→(2,-1)。",人教版初中数学,normal
+math,ch_rotation,kp_rot_figure,choice,medium,线段 AB 绕点 O 旋转 90° 得到线段 A'B'，则下列正确的是（　）,C,"[""A. AB>A'B'"", ""B. AB<A'B'"", ""C. AB=A'B' 且 ∠AOA'=90°"", ""D. AB∥A'B'""]",旋转不改变线段长度（AB=A'B'），旋转角 ∠AOA'=90°。,人教版初中数学,normal
+math,ch_rotation,kp_rot_center,fill,easy,风车叶片转动时，旋转中心是风车的____。,中心（转轴所在点）,,叶片绕风车中心固定点转动，该点即旋转中心。,人教版初中数学,normal
+math,ch_probability,kp_prob_event,choice,easy,下列事件中属于随机事件的是（　）,B,"[""A. 太阳从东方升起"", ""B. 掷一枚均匀骰子，朝上点数为6"", ""C. 三角形的内角和为360°"", ""D. 负数大于正数""]",随机事件可能发生也可能不发生：掷出6点是随机事件；A是必然事件，C、D是不可能事件。,人教版初中数学,normal
+math,ch_probability,kp_prob_definition,fill,medium,抛掷一枚均匀硬币，正面朝上的概率是____。,0.5,,古典概型：等可能结果 2 个，正面占 1 个，P=1/2。,人教版初中数学,normal
+math,ch_probability,kp_prob_list,choice,medium,从写有 1、2、3 的三张卡片中任抽两张排成一个两位数，这个两位数是偶数的概率是（　）,B,"[""A. 1/2"", ""B. 1/3"", ""C. 1/4"", ""D. 2/3""]",列举 6 个两位数：12、13、21、23、31、32，其中偶数 12、32 共 2 个，P=2/6=1/3。,人教版初中数学,normal
+math,ch_probability,kp_prob_tree,fill,medium,不透明袋中有 2 红 1 白共 3 个球，摸出一球不放回再摸一球，两次都摸到红球的概率是____。,1/3,,树状图：第一次红 2/3，第二次红 1/2，P=2/3×1/2=1/3。,人教版初中数学,normal
+math,ch_probability,kp_prob_frequency,fill,easy,在大量重复试验中，随机事件发生的频率会稳定在某个常数附近，这个常数就是该事件的____。,概率,,频率稳定性定义概率：试验次数越多，频率越接近概率。,人教版初中数学,normal
+math,ch_similarity,kp_sim_ratio,fill,medium,两个相似三角形的相似比为 2:3，则它们的面积比为____。,4:9,,相似三角形面积比等于相似比的平方：(2/3)²=4/9。,人教版初中数学,normal
+math,ch_similarity,kp_sim_parallel,choice,medium,△ABC 中 DE∥BC，AD:DB=1:2，则 DE:BC=（　）,B,"[""A. 1:2"", ""B. 1:3"", ""C. 2:3"", ""D. 1:4""]",DE∥BC 得 △ADE∽△ABC，相似比 AD:AB=1:3，故 DE:BC=1:3。,人教版初中数学,normal
+math,ch_similarity,kp_sim_criteria,fill,medium,"两角分别相等的两个三角形____（填""相似""""全等""或""不确定""）。",相似,,判定定理：两角分别相等 → 相似；全等还需对应边相等。,人教版初中数学,normal
+math,ch_similarity,kp_sim_properties,choice,easy,相似三角形的对应角____，对应边____（　）,A,"[""A. 相等、成比例"", ""B. 成比例、相等"", ""C. 相等、相等"", ""D. 成比例、成比例""]",相似的定义：对应角相等、对应边成比例。,人教版初中数学,normal
+math,ch_similarity,kp_sim_homothety,fill,medium,"位似图形一定是____图形（填""相似""或""全等""）。",相似,,位似是特殊的相似：对应点连线交于位似中心，且对应边互相平行或共线。,人教版初中数学,normal
+math,ch_inverse_func,kp_inverse_def,fill,easy,反比例函数 y=k/x（k≠0）中，自变量 x 不能为____。,0,,分母不能为零，故 x≠0。,人教版初中数学,normal
+math,ch_inverse_func,kp_inverse_def,fill,easy,反比例函数 y=-3/x 的比例系数 k=____。,-3,,反比例函数标准形式 y=k/x，这里 k=-3。,人教版初中数学,normal
+math,ch_inverse_func,kp_inverse_k,fill,medium,"反比例函数 y=k/x 的图象过点 (2,3)，则 k=____。",6,,代入得 3=k/2，k=6。,人教版初中数学,normal
+math,ch_inverse_func,kp_inverse_k,choice,medium,反比例函数 y=-4/x 的图象位于（　）,B,"[""A. 第一、三象限"", ""B. 第二、四象限"", ""C. 第一、二象限"", ""D. 第三、四象限""]",k=-4<0，图象在第二、四象限。,人教版初中数学,normal
+math,ch_inverse_func,kp_inverse_graph,fill,medium,反比例函数 y=6/x 在第一象限内，y 随 x 的增大而____。,减小,,k=6>0 时每个象限内 y 随 x 增大而减小（注意不能跨象限比较）。,人教版初中数学,normal
+math,ch_inverse_func,kp_inverse_graph,choice,medium,正比例函数 y=2x 与反比例函数 y=2/x 的图象交点个数是（　）,C,"[""A. 0"", ""B. 1"", ""C. 2"", ""D. 4""]","联立 2x=2/x 得 x²=1，x=±1，两个交点 (1,2)、(-1,-2)。",人教版初中数学,normal
+math,ch_inverse_func,kp_inverse_apply,fill,hard,矩形面积固定为 6，长为 x，宽为 y，则 y 与 x 的函数关系式是____。,y=6/x,,xy=6 → y=6/x（x>0），是反比例函数的实际模型。,人教版初中数学,normal
+math,ch_trig,kp_trig_defs,fill,easy,在 Rt△ABC 中 ∠C=90°，sinA=____（用边的比表示，如 AB/BC）。,BC/AB,,sinA=∠A 的对边/斜边=BC/AB。,人教版初中数学,normal
+math,ch_trig,kp_trig_defs,choice,easy,在 Rt△ABC 中 ∠C=90°，cosB 表示（　）,B,"[""A. ∠B 的对边与斜边之比"", ""B. ∠B 的邻边与斜边之比"", ""C. ∠B 的对边与邻边之比"", ""D. ∠B 的邻边与对边之比""]",cosB=∠B 的邻边/斜边=BC/AB。,人教版初中数学,normal
+math,ch_trig,kp_trig_special,fill,easy,sin30°=____。,0.5,,特殊角三角函数值：sin30°=1/2。,人教版初中数学,normal
+math,ch_trig,kp_trig_special,fill,easy,tan45°=____。,1,,等腰直角三角形两直角边相等，tan45°=1。,人教版初中数学,normal
+math,ch_trig,kp_trig_solve,fill,medium,Rt△ABC 中 ∠C=90°，AB=10，sinA=0.6，则 BC=____。,6,,sinA=BC/AB → BC=10×0.6=6。,人教版初中数学,normal
+math,ch_trig,kp_trig_solve,choice,medium,Rt△ABC 中 ∠C=90°，AC=3，BC=4，则 tanA=（　）,B,"[""A. 3/4"", ""B. 4/3"", ""C. 3/5"", ""D. 4/5""]",tanA=对边/邻边=BC/AC=4/3。,人教版初中数学,normal
+math,ch_trig,kp_trig_apply,fill,hard,一斜坡的坡度 i=1:2（竖直高度:水平宽度），若竖直高度为 3m，则斜坡长为____m。,3√5,,水平宽度=6m，斜坡长=√(3²+6²)=√45=3√5。,人教版初中数学,normal

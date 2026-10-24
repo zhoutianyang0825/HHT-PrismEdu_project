@@ -79,3 +79,5 @@ class Teacher(Base):
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # 注意：班级与学科关系一律看 teaching_assignments，这里只放静态档案
+    # 想看教师信息全貌（账号+角色+任教+任命+档案拼一行）→ 查视图 teacher_overview
+    #   （alembic 0002 建的只读视图，不存数据、零同步；本表由 _sync_teacher_profile 跟 teacher 角色同步）

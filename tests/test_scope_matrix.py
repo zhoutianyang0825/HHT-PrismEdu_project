@@ -298,7 +298,11 @@ ENDPOINTS = [
        {"class_id": 1, "title": "演示作业", "kp_ids": ["kp_crossmult"],
         "per_kp": 1, "score": 5.0},
        TEACHER_OK),
-    Ep("tea.homework_submissions", "GET", "/api/teacher/homework/{homework_id}/submissions",
+    Ep("tea.knowledge_points", "GET", "/api/teacher/knowledge-points",
+       "/api/teacher/knowledge-points", allow=TEACHER_OK),
+    Ep("tea.homeworks", "GET", "/api/teacher/homeworks", "/api/teacher/homeworks",
+       allow=TEACHER_OK),
+    Ep("tea.homework_submissions", "GET", "/api/teacher/homework/{homework_ref}/submissions",
        "/api/teacher/homework/31/submissions", allow=TEACHER_OK),
     Ep("tea.grade_trigger", "POST", "/api/teacher/grade/{answer_id}",
        "/api/teacher/grade/41", allow=TEACHER_OK),
@@ -341,10 +345,13 @@ ENDPOINTS = [
     # ---- admin 组（router 级 require_any("admin")）----
     Ep("adm.users", "GET", "/api/admin/users", "/api/admin/users", allow={"admin"}),
     Ep("adm.user_create", "POST", "/api/admin/users", "/api/admin/users",
-       {"username": "newu9", "password": PASSWORD, "name": "新用户", "roles": ["student"]},
+       {"username": "newu9", "password": PASSWORD, "name": "新用户", "roles": ["student"],
+        "class_id": 1},
        {"admin"}),
     Ep("adm.user_update", "PUT", "/api/admin/users/{user_id}", "/api/admin/users/2",
        {"name": "改名测试"}, {"admin"}),
+    Ep("adm.user_delete", "DELETE", "/api/admin/users/{user_id}", "/api/admin/users/8",
+       allow={"admin"}),   # 8=T003 无作业无档案，删除无历史数据直接走通
     Ep("adm.users_import", "POST", "/api/admin/users/import", "/api/admin/users/import",
        {"csv_content": "username,password,name,roles\nN001,Passw0rd1,甲,student\n"},
        {"admin"}),
@@ -478,7 +485,7 @@ def test_all_api_routes_covered():
     为什么走 openapi() 而不是 app.routes：
       新版 FastAPI 的 include_router 不再把子路由摊平进 app.routes
       （挂成 _IncludedRouter），遍历 app.routes 只能看到 /health 一条；
-      openapi()["paths"] 是最终生效的完整路由表（43 条操作），拿来对账最准。
+      openapi()["paths"] 是最终生效的完整路由表（44 条操作），拿来对账最准。
     """
     spec = app.openapi()
     actual = {

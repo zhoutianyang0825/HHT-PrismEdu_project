@@ -5,19 +5,25 @@
     START → safety_check ──blocked──→ respond → END
                 │放行
                 ▼
-          classify_intent 意图识别
+          classify_intent 意图识别（五类）
                 │ (条件边 route_by_intent)
-    ask_answer  │  submit_answer        explain        off_topic
-                ▼        ▼                 ▼               ▼
-        guide_scaffold  grade_submit   explain_concept  respond
-                │             │              │
-                │ (回到分类)   └──────┬───────┘
-                ▼                    ▼
-          classify_intent          respond → END
+  ask_answer  │  guide_scaffold   submit_answer   explain      off_topic
+                ▼        ▼             ▼              ▼            ▼
+        guide_scaffold  guide_scaffold  grade_submit  explain_concept  respond
+                │             │             │              │
+                │ (回到分类)   │             └──────┬───────┘
+                ▼             ▼                    ▼
+          classify_intent  explain_concept        respond → END
+                          （引导满 3 轮）
 
 🔴 interrupt 链路：guide_scaffold 内部挂起 → Command(resume=学生新输入)
    → 节点从挂起点继续 → 固定边回到 classify_intent 重新分类
    （学生拿到提示后可能"再要提示"，也可能直接"提交作答"，必须重新路由）
+
+★ 两条引导入口（提高引导节点命中率）：
+    ask_answer     "这题答案是多少" → 不给答案，先引导
+    guide_scaffold "这题考什么/我没思路/给点提示" → 直接进引导
+    引导满 3 轮仍未解出 → force_explain → explain_concept 给完整解答
 """
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -44,32 +50,42 @@ def route_after_safety(state: StudentAgentState) -> str:
 # 路由函数2，核心路由表
 def route_by_intent(state: StudentAgentState) -> str:
     """意图 → 节点名 的路由表（条件边只认"返回节点名"这一种契约）。"""
-    # 通过classify_intent节点 返回的 intent字段，来取出下一步要跳转的节点
+    # 通过classify_intent节点返回的 intent字段，来取出下一步要跳转的节点
     return {
-        "ask_answer": "guide_scaffold", # 直接问答案时，不能直接给答案，先引导学生
-        "submit_answer": "grade_submit",
-        "explain": "explain_concept",   # 直接说不会做/要讲解时，启动讲解
+        "ask_answer": "guide_scaffold",    # 直接问答案时，不能直接给答案，先引导学生
+        "guide_scaffold": "guide_scaffold", # 学生主动要思路/提示（这题考什么/没思路/给点提示）→ 走引导
+        "submit_answer": "grade_submit",    # 答案提交
+        "explain": "explain_concept",       # 明确要求讲解/解析 → 启动讲解
         "off_topic": "respond",
     }[state["intent"]]
 
 
+
 # 路由函数3
 def route_after_guide(state: StudentAgentState) -> str:
-    """guide_scaffold 之后的去向（🔴 防死循环闸门）。
+    """guide_scaffold 之后的去向（🔴 防死循环闸门 + 满轮转讲解）。
 
-    得到的数据：state["messages"] 末条消息
+    得到的数据：state["messages"] 末条消息、state["force_explain"] 标记
 
-    要做的操作：按末条消息类型分流
-      ① 末条是 AIMessage（满 3 轮分支已产出完整讲解终稿）→ 直接 "respond" 出口
+    要做的操作：分三种情况
+      ① force_explain=True（引导已满 3 轮）→ "explain_concept"
+         去讲解节点给完整解答（带 RAG 教材出处），
+         不能再回 classify_intent：同一句"还是不会"会被再次分类成 guide_scaffold
+         → 再进 guide_scaffold → 又满轮 → 无限循环烧 token
+
+      ② 末条是 AIMessage（讲解类节点已产出终稿）→ 直接 "respond" 出口
          绝不能再回 classify_intent：同一句学生输入会被再次分类成 ask_answer
          → 再进 guide_scaffold → 再出一遍完整讲解 → 无限循环烧 token
-         
-      ② 末条是 HumanMessage（interrupt 恢复后记入了学生新回答）→ 回 "classify_intent"
+
+      ③ 末条是 HumanMessage（interrupt 恢复后记入了学生新回答）→ 回 "classify_intent"
          重新分类（学生可能转而提交作答/要讲解）
 
-    返回：节点名，形如 "respond" 或 "classify_intent"
+    返回：节点名，形如 "explain_concept" / "respond" / "classify_intent"
     """
     from langchain_core.messages import AIMessage
+
+    if state.get("force_explain"):
+        return "explain_concept"
 
     msgs = state.get("messages") or []
     return "respond" if msgs and isinstance(msgs[-1], AIMessage) else "classify_intent"
@@ -121,10 +137,14 @@ def build_student_graph(
 
 
     # ← 回环：从引导节点再回到分类节点，"提示完，学生会有经过interrupt输入的回答，可能是讲解、提交、再次引导"
-    # 但满3轮的完整讲解分支（末条已是 AIMessage 终稿）直接去 respond，防死循环（route_after_guide）
+    # 但满3轮的分支（force_explain=True）直接去 explain_concept 给完整解答，防死循环（route_after_guide）
     builder.add_conditional_edges(
         "guide_scaffold", route_after_guide,
-        {"classify_intent": "classify_intent", "respond": "respond"},
+        {
+            "classify_intent": "classify_intent",
+            "explain_concept": "explain_concept",
+            "respond": "respond",
+        },
     )
     builder.add_edge("explain_concept", "respond")       # 生成的讲解内容，更新至state中，然后返回包装成 sse数据帧，yield抛出数据帧
     builder.add_edge("grade_submit", "respond")

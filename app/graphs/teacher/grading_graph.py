@@ -42,6 +42,8 @@ from sqlalchemy import select
 from typing_extensions import TypedDict
 
 from app.core.llm import get_llm
+from app.core.structured import invoke_structured
+from app.core.textfmt import OUTPUT_FORMAT_RULES, clean_llm_text
 from app.db.session import get_session_factory
 from app.models import (
     ErrorLog,
@@ -272,7 +274,8 @@ def llm_grade_subjective(state: GradingState) -> dict:
         "你是严谨的初中数学阅卷老师。按标准答案和解析给学生作答打分：\n"
         "1. 按采分点给分，部分正确给部分分，不允许一律 0 分或满分；\n"
         "2. ai_comment 必须指出答对了哪几步、缺了哪一步；\n"
-        "3. scoring_basis 逐条对照采分点（对的标注'已达成'，缺的标注'缺失'）。"
+        "3. scoring_basis 逐条对照采分点（对的标注'已达成'，缺的标注'缺失'）。\n\n"
+        + OUTPUT_FORMAT_RULES
     )
     human = (
         f"题目满分：{state['full_score']} 分（请按百分制打分，代码会换算）\n"
@@ -282,9 +285,11 @@ def llm_grade_subjective(state: GradingState) -> dict:
         f"学生作答：{state['student_answer']}"
     )
     try:
-        grade: SubjectiveGrade = get_llm(temperature=0).with_structured_output(
-            SubjectiveGrade
-        ).invoke([("system", system), ("human", human)])
+        grade: SubjectiveGrade = invoke_structured(
+            get_llm(temperature=0),
+            SubjectiveGrade,
+            [("system", system), ("human", human)],
+        )
 
         # 百分制 → 本题满分尺度：LLM 按 100 打分好约束（ge=0 le=100），
         # 换算后才能直接和 full_score 比、写进 student_answers.score
@@ -292,6 +297,9 @@ def llm_grade_subjective(state: GradingState) -> dict:
 
     except Exception:
         # LLM 挂了不能堵死批改链路：给保守建议（0 分 + 说明），老师手动改
+        # ★ 注意：以前这里几乎必然触发——with_structured_output 对 DeepSeek
+        #   一直抛 400（response_format 不支持），批改建议实际从没真正用过 LLM。
+        #   现已改走 invoke_structured（见 app/core/structured.py）。
         ai_score = 0.0
         grade = SubjectiveGrade(
             ai_score=0,
@@ -310,8 +318,8 @@ def llm_grade_subjective(state: GradingState) -> dict:
         "answer_id": state["answer_id"],
         "full_score": state["full_score"],
         "ai_score": ai_score,
-        "ai_comment": grade.ai_comment,
-        "scoring_basis": grade.scoring_basis,
+        "ai_comment": clean_llm_text(grade.ai_comment),
+        "scoring_basis": [clean_llm_text(b) for b in grade.scoring_basis],
         "confidence": grade.confidence,
     })
 
@@ -324,8 +332,8 @@ def llm_grade_subjective(state: GradingState) -> dict:
 
     return {
         "ai_score": ai_score,
-        "ai_comment": grade.ai_comment,
-        "ai_scoring_basis": grade.scoring_basis,
+        "ai_comment": clean_llm_text(grade.ai_comment),
+        "ai_scoring_basis": [clean_llm_text(b) for b in grade.scoring_basis],
         "ai_confidence": grade.confidence,
         "teacher_decision": teacher_decision,
         # confirm/edit 先写 pending，随后被 apply_teacher_decision 覆盖成 confirmed
@@ -515,9 +523,11 @@ def attribute_error(state: GradingState) -> dict:
         f"标准答案：{state['standard_answer']}"
     )
     try:
-        result: ErrorAttribution = get_llm(temperature=0).with_structured_output(
-            ErrorAttribution
-        ).invoke([("system", system), ("human", human)])
+        result: ErrorAttribution = invoke_structured(
+            get_llm(temperature=0),
+            ErrorAttribution,
+            [("system", system), ("human", human)],
+        )
         error_type = result.error_type if result.error_type in ("概念不清", "方法不会", "粗心", "审题失误") \
             else "方法不会"
         

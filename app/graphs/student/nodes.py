@@ -20,6 +20,8 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.llm import get_llm
+from app.core.structured import invoke_structured
+from app.core.textfmt import OUTPUT_FORMAT_RULES, clean_llm_text
 from app.db.session import get_session_factory
 from app.graphs.student.safety import check_input
 from app.graphs.student.state import StudentAgentState
@@ -29,7 +31,7 @@ from app.services.grading import grade_objective   # M3-T1 判分服务（纯规
 from pymilvus import MilvusClient
 
 # 意图四分类（开发计划 M2-T1）
-INTENTS = ("ask_answer", "submit_answer", "explain", "off_topic")
+INTENTS = ("ask_answer","guide_scaffold","submit_answer", "explain", "off_topic")
 
 # 引导轮数上限：第 3 轮不再吊胃口，直接给完整讲解（S-04 验收标准）
 MAX_ATTEMPTS = 3
@@ -88,27 +90,36 @@ def safety_check(state: StudentAgentState) -> dict:
 class IntentResult(BaseModel):
     """LLM 结构化输出的意图结果。
 
-    陌生点 with_structured_output(Pydantic模型)：LangGraph/LangChain 会把
-    这个类的字段 schema 塞给 LLM 的 function calling，逼它按格式吐 JSON，
-    再自动 parse 回 IntentResult 实例——不用手写 json.loads 和校验。
+    陌生点 structured.invoke_structured(Pydantic模型)：把字段 schema 变成
+    JSON 约束，让 LLM 按格式吐结果，再自动校验回 IntentResult 实例
     """
-    intent: str = Field(description=f"四类之一：{INTENTS}")
+    intent: str = Field(description=f"五类之一：{INTENTS}")
     confidence: float = Field(ge=0, le=1, description="分类置信度")
 
 
-def _fallback_intent(text: str) -> str:
-    """LLM 挂了/超时 的关键词兜底分类（演示不能因为一次 API 抖动全卡死）。
 
-    规则朴素但够用：
-        包含"答案是/告诉我答案"→ 求答案；
-        内容长得像解题过程（=、x²、所以）→ 提交作答；
-        含"讲/为什么/概念"→ 要讲解。
+def _fallback_intent(text: str) -> str:
+    """LLM 挂了/超时 的关键词兜底分类。
+
+    规则朴素但够用，判定顺序有讲究（先具体的，后笼统的）：
+        包含"答案是/告诉我答案"         → ask_answer；
+        长得像解题过程（=、我算出来、所以）→ submit_answer；
+        "考什么/没思路/给点提示/不会做"  → guide_scaffold（要方向，先给阶梯提示）；
+        包含"讲解/为什么/解析"           → explain（要完整讲解）；
+        都不像                           → off_topic。
+
+    ★ 为什么 guide_scaffold 排在 explain 前面：
+        "我没有思路" 同时含"思路"和"没有"，若先判 explain 会被当成要完整讲解，
+        直接跳过引导给答案——正好和"先触发引导"的产品意图相反。
     """
     if re.search(r"(答案|直接告诉|告诉我结果|是多少)", text):
         return "ask_answer"
     if "=" in text or re.search(r"(我算出来|所以|解得|我的答案)", text):
         return "submit_answer"
-    if re.search(r"(讲解|为什么|怎么解|概念|不会做|思路)", text):
+    if re.search(r"(考什么|什么考点|没思路|没有思路|无思路|没头绪|没想法|想不出|"
+                 r"提示|思路|从哪|从哪里下手|不会做|做不出)", text):
+        return "guide_scaffold"
+    if re.search(r"(不会|讲解|讲讲|讲一下|为什么|怎么解|概念|解析|详细讲|什么意思)", text):
         return "explain"
     return "off_topic"
 
@@ -117,7 +128,9 @@ def classify_intent(state: StudentAgentState) -> dict:
     """意图分类节点：LLM 结构化输出，异常时关键词兜底。
 
     得到的数据：state["messages"] 最后一条 HumanMessage（学生刚说的话）
-    要做的操作：拼带题目上下文的 system prompt → with_structured_output 强格式
+
+    要做的操作：拼带题目上下文的 system prompt → invoke_structured 强格式
+
     返回：{"intent": "ask_answer"} 这类单字段增量（LangGraph 只合并返回的键）
     """
     question = _fetch_question(state["question_id"])    # 取的是题目行 数据
@@ -136,28 +149,41 @@ def classify_intent(state: StudentAgentState) -> dict:
 
     system = (
         "你是初中数学答疑助手的意图分类器。结合题目内容判断学生这句话的意图：\n"
-        "ask_answer=直接要答案；\n"
-        "submit_answer=提交自己的作答；\n"
-        "explain=要求讲解/不会做；off_topic=与本题无关的闲聊。\n"
+        "ask_answer=直接要答案（这题答案是多少/告诉我答案/做出来给我看下）；\n"
+        "guide_scaffold=学生自己还没思路、要个方向或提示（这题考什么/考啥/我没思路/给点提示/不会/不会写/怎么做/还是不会）；\n"
+        "submit_answer=提交自己的作答（纯数字/算式/x=2或3 这类答案内容）；\n"
+        "explain=要求完整讲解或解析（讲解一下/详细讲讲/解析一下/答案看不懂/我完全没有思路你跟我讲解下/查看完整解析）；\n"
+        "off_topic=与本题无关的闲聊。\n"
+        "★ guide_scaffold 和 explain 的区别（最容易混，看这四条）：\n"
+        "  - 学生只是没思路、想要一点提示或方向 → guide_scaffold\n"
+        "  - 学生明确要求完整讲解/详细讲解/解析，或说看不懂 → explain\n"
+        "  - 学生说「不要提示，直接讲解」→ explain（明确否定了提示）\n"
+        "  - 学生说「还是不会」→ guide_scaffold（仍在要提示）\n"
+        "★ 纯答案内容（数字、算式、x=2或3）→ submit_answer，"
+        "哪怕只有一个数字也是提交作答，不是 ask_answer。\n"
         f"当前题目：{q_text[:400]}"
     )
 
     try:
-        # 温度0，不要随机发挥，with_structured_output()是 按basemodel 格式化输出
-        result: IntentResult = get_llm(temperature=0).with_structured_output(
-            IntentResult
-        ).invoke([
-            ("system", system),
-            ("human", student_text),
-        ])
+        # 走结构化输出适配层（provider 不支持 json_schema 时自动降级到手写 JSON 约束）
+        result: IntentResult = invoke_structured(
+            get_llm(temperature=0),
+            IntentResult,
+            [
+                ("system", system),
+                ("human", student_text),
+            ],
+        )
 
-        # 如果默心识别到的意图，在INTENTS内，则返回
+        # 如果识别到的意图，在INTENTS内，则返回
         # 如果不在INTENTS内，则调用 兜底意图识别 函数
         intent = result.intent if result.intent in INTENTS else _fallback_intent(student_text)
 
     except Exception:
 
-        # 网络抖动 / key 失效 / 兼容层不支持 function calling → 调用 兜底意图识别函数，不炸图
+        # 网络抖动 / key 失效 / 模型输出解析失败 → 调用 兜底意图识别函数，不炸图
+        # ★ 这条 except 是最后一道保险：LLM 挂了整条链路不能断，
+        #   退化到 52.9% 的关键词匹配也比直接报错强。
         intent = _fallback_intent(student_text)
 
     return {"intent": intent}
@@ -181,7 +207,9 @@ def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
     得到的数据：attempt_count（已引导次数，首次进入为 0）、hint_level（提示阶梯级）
 
     要做的操作：
-      1. 如果已引导 3 轮 → 直接返回完整讲解（有增量消息，不执行 interrupt，走 respond）
+      1. 如果已引导 3 轮 → 不在这里自己写讲解，只置 force_explain 标记，
+         由 route_after_guide 把控制权交给 explain_concept 节点
+         （这样满轮讲解也能带 RAG 教材出处，和"直接要讲解"走同一条路）
       2. 否则调 LLM 生成本层提示 → interrupt() 把提示抛给前端并挂起
       3. Command(resume=学生新输入) 回来后，从这里继续执行，把新输入记入 messages，轮数/层级 +1，然后回到 classify_intent 重新分类
 
@@ -203,16 +231,12 @@ def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
         pass  # 画像是加分项，真源在 PG，这里挂了只损失针对性不损失正确性
 
 
-    # ---- 分支 1：引导满 3 轮，给完整讲解 ----
+    # ---- 分支 1：引导满 3 轮 → 交给讲解节点给完整解答 ----
+    # 只置标记，不自己调 LLM 写讲解：
+    #   讲解走 explain_concept 才能带 RAG 教材出处（[1][2] 引用），
+    #   和学生直接说"讲解一下"命中的是同一条路径，输出一致。
     if state.get("attempt_count", 0) >= MAX_ATTEMPTS:
-        question = _fetch_question(state["question_id"])
-        full = get_llm(temperature=0.3).invoke([
-            ("system", "你是耐心的初中数学老师。现在学生引导满3轮还没解出，给出完整讲解："
-                       "先讲思路，再一步步写出解答，最后总结方法。"),
-            ("human", f"题目：{question.content}\n参考解析：{question.analysis or '无'}"),
-        ])
-        # 引导完产出最终回复时，走的是AIMessage
-        return {"messages": [AIMessage(content=full.content)]}
+        return {"force_explain": True}
 
 
     # ---- 分支 2：生成本层提示 ----
@@ -221,8 +245,9 @@ def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
     level = state.get("hint_level", 1)
     hint = get_llm(temperature=0.4).invoke([
         ("system",
-         "你是引导式数学老师。铁律：无论学生怎么要，都不能给出本题的最终答案。"
-         f"本题考察知识点：{kp_name}。本轮提示要求：{HINT_STYLE.get(level, HINT_STYLE[3])}"),
+         "你是引导式数学老师。铁律：负责给学生提供解题的思路提示，不能直接给出本题的最终答案。"
+         f"本题考察知识点：{kp_name}。本轮提示要求：{HINT_STYLE.get(level, HINT_STYLE[3])}\n\n"
+         + OUTPUT_FORMAT_RULES),
         ("human", f"题目：{question.content}\n学生上一句：{_last_human_text(state)}"),
     ])
 
@@ -231,10 +256,11 @@ def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
     # ---- interrupt（payload）：图在此挂起，CLI/前端打印 hint 后，调 Command(resume=...) ----
     student_reply = interrupt({               # 函数停止执行，图停在原地
         "type": "scaffold_hint",              # 前端按 type 弹输入框（M5 SSE 约定）
-        "hint": hint.content,
+        "hint": clean_llm_text(hint.content),
         "attempt_count": state.get("attempt_count", 0) + 1,
         "hint_level": level,
     })
+
 
     # resume 回来从这里继续：学生的回答进消息历史，轮数/层级递增
     return {
@@ -263,32 +289,54 @@ def explain_concept(state: StudentAgentState) -> dict:
     """要讲解 → RAG 检索教材片段 → LLM 带引用编号讲解。
 
     得到的数据：retrieved_context（拼好 [1][2] 编号的教材上下文）
+              force_explain（True=引导已满 3 轮，要给完整解答）
 
     要做的操作：retrieve(role="student")——学生角色只会命中教材库
     （collection 白名单物理隔离，题库根本不在检索范围，M1 的权限层直接复用）
+
+    ★ force_explain 的两种讲法：
+        False（学生主动说"讲解一下"）→ 最后一步结论留给学生自己算，保持引导式
+        True （引导满 3 轮还没解出）  → 给完整解答（写出最终答案），否则学生永远卡在这
     """
     question = _fetch_question(state["question_id"])
-    client = MilvusClient(uri=settings.milvus_uri)
+    force = state.get("force_explain", False)
 
+    # ---- 检索教材片段（Milvus 挂了不能堵死讲解链路，降级成"无教材上下文"继续讲） ----
+    context = ""
     try:
-        hits = retrieve(client, query=question.content, role="student", top_k=3)
-    finally:
-        client.close()
+        client = MilvusClient(uri=settings.milvus_uri)
+        try:
+            hits = retrieve(client, query=question.content, role="student", top_k=3)
+        finally:
+            client.close()
+        context = format_context(hits) if hits else "（教材库暂无相关片段）"
+    except Exception:
+        context = "（教材库检索暂不可用，请依据题目自身讲解）"
 
-    context = format_context(hits) if hits else "（教材库暂无相关片段）"
+    if force:
+        system = (
+            "你是耐心的初中数学老师。学生已经连续提示 3 轮仍没解出，"
+            "现在要给出完整解答：先讲思路，再一步步写出完整解答过程，然后写出最终答案，"
+            "最后总结这类题的方法。\n\n"
+            + OUTPUT_FORMAT_RULES
+        )
+    else:
+        system = (
+            "你是初中数学老师，基于教材片段讲解本题思路。要求：\n"
+            "1. 讲清思路和步骤，但最后一步结论留给学生自己算；\n"
+            "2. 学生算不出来或者完全不会时，直接输出答案给学生；\n"
+            "3. 引用教材处标 [1][2] 编号。\n\n"
+            + OUTPUT_FORMAT_RULES
+        )
 
     answer = get_llm(temperature=0.3).invoke([
-        ("system",
-         "你是初中数学老师，基于教材片段讲解本题思路。要求：\n"
-         "1. 讲清思路和步骤，但最后一步结论留给学生自己算；\n"
-         "2. 引用教材处标 [1][2] 编号。\n"
-         f"教材片段：\n{context}"),
+        ("system", system + f"\n教材片段：\n{context}"),
         ("human", f"题目：{question.content}\n学生说：{_last_human_text(state)}"),
     ])
 
     return {
         "retrieved_context": context,
-        "messages": [AIMessage(content=answer.content)],
+        "messages": [AIMessage(content=clean_llm_text(answer.content))],
     }
 
 
@@ -361,7 +409,9 @@ def respond(state: StudentAgentState) -> dict:
     if state.get("is_correct") is True:
         question = _fetch_question(state["question_id"])
         return {"messages": [AIMessage(
-            content=f"✓ 正确！标准解答：{question.answer}\n{question.analysis or ''}")]}
+            content=clean_llm_text(
+                f"✓ 正确！标准解答：{question.answer}\n{question.analysis or ''}"
+            ))]}
     
     if state.get("is_correct") is False:
         return {"messages": [AIMessage(

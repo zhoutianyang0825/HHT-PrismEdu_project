@@ -293,6 +293,113 @@ export function esc(str) {
   ));
 }
 
+/* ---------------------------------------------------------------- 轻量 Markdown */
+/**
+ * 把 LLM 输出的 Markdown 渲染成 HTML（学生端讲解、AI 评语共用）。
+ *
+ * 只支持最常用的一小撮语法，够用且不会引入外部库（离线环境拉不到 CDN）：
+ *   **加粗**   *斜体*   `行内代码`   ``` 代码块```   1. 有序列表   - 无序列表
+ *   > 引用行   #### 小标题   段落（空行分段）
+ *
+ * ★ 安全顺序：先 esc 转义，再做标签替换——绝不能反过来，
+ *   否则用户输入的 <script> 会被当成标签插进 DOM。
+ */
+export function md(text) {
+  const raw = String(text ?? "").replace(/\r\n/g, "\n");
+  const lines = raw.split("\n");
+
+  const out = [];
+  let inCode = false;
+  let codeBuf = [];
+  let listTag = "";      // 当前列表类型："ul" | "ol"
+  let listItems = [];    // [{parts: [html]}]，一个 item 可有多段（缩进续行并进来）
+  let pendingGap = 0;    // 攒着的空行数，落成一条间距分隔
+
+  const pushBlock = (html) => {
+    if (pendingGap > 0) { out.push(`<div class="md-gap"></div>`); pendingGap = 0; }
+    out.push(html);
+  };
+
+  const flushList = () => {
+    if (!listItems.length) { listTag = ""; return; }
+    const items = listItems.map((it) => `<li>${it.parts.join("")}</li>`);
+    pushBlock(`<${listTag}>${items.join("")}</${listTag}>`);
+    listItems = [];
+    listTag = "";
+  };
+
+  for (const line of lines) {
+    // ---- 代码块：原样保留，不解析任何标记 ----
+    if (/^\s*```/.test(line)) {
+      if (!inCode) { flushList(); inCode = true; codeBuf = []; }
+      else { pushBlock(`<pre class="md-code"><code>${esc(codeBuf.join("\n"))}</code></pre>`); inCode = false; codeBuf = []; }
+      continue;
+    }
+    if (inCode) { codeBuf.push(line); continue; }
+
+    // ---- 空行：记一次间距（连续空行只算一次） ----
+    if (!line.trim()) { flushList(); pendingGap++; continue; }
+
+    // ---- 列表：连续同类行合并成一个 <ul>/<ol> ----
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    if (ol || ul) {
+      const t = ol ? "ol" : "ul";
+      if (listTag && listTag !== t) flushList();
+      listTag = t;
+      listItems.push({ parts: [inlineMd((ol || ul)[1])] });
+      continue;
+    }
+
+    // ---- 缩进续行：并进上一个列表项（LLM 常把公式/说明缩进写在列表项下面） ----
+    if (/^\s+\S/.test(line) && listItems.length) {
+      listItems[listItems.length - 1].parts.push(`<div class="md-li-cont">${inlineMd(line.trim())}</div>`);
+      continue;
+    }
+    flushList();
+
+    // ---- 整行加粗：当成小标题（LLM 用 **加粗** 标小节，比 # 标题更常见） ----
+    const bold = line.match(/^\s*\*\*(.+?)\*\*\s*$/);
+    if (bold) {
+      pushBlock(`<div class="md-sub">${inlineMd(bold[1])}</div>`);
+      continue;
+    }
+
+    // ---- 标题 ----
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      const lv = Math.min(h[1].length + 2, 6);   // h1~h4 → h3~h6，避免撑破气泡排版
+      pushBlock(`<h${lv} class="md-h">${inlineMd(h[2])}</h${lv}>`);
+      continue;
+    }
+
+    // ---- 引用 ----
+    const q = line.match(/^>\s?(.*)$/);
+    if (q) { pushBlock(`<div class="md-quote">${inlineMd(q[1])}</div>`); continue; }
+
+    // ---- 普通行 ----
+    pushBlock(`<div class="md-p">${inlineMd(line)}</div>`);
+  }
+  if (inCode && codeBuf.length) pushBlock(`<pre class="md-code"><code>${esc(codeBuf.join("\n"))}</code></pre>`);
+  flushList();
+
+  return out.join("");
+}
+
+/** 行内标记：代码 → 加粗 → 斜体（顺序有讲究：先吃反引号，避免把 ** 当成代码） */
+export function mdInline(s) {
+  let t = esc(s);
+  t = t.replace(/`([^`]+)`/g, "<code class=\"md-icode\">$1</code>");
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  return t;
+}
+
+/** md() 内部用（保持行内标记逻辑只有一份） */
+function inlineMd(s) {
+  return mdInline(s);
+}
+
 export function clip(str, n = 40) {
   const s = String(str ?? "");
   return s.length > n ? `${s.slice(0, n)}…` : s;

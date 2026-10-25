@@ -227,7 +227,16 @@ def answer_stream(
             └ classify_intent = explain → explain_concept（RAG+LLM）
             └ 讲解 AIMessage 增量 → yield message 帧（补丁后能正常发到前端）✅
 
-        t7  respond 空过（满3轮引导后，第4轮 guide_scaffold 函数的产出已是 AIMessage，直接空过透传{}）→ END → yield end 帧 ✅
+        t7  引导满 3 轮仍不会 → guide_scaffold 置 force_explain → 路由到 explain_concept
+            └ 讲完整解答（写出最终答案，带 RAG 教材出处）
+            └ respond 空过（AIMessage 已在 explain_concept 产出）→ END → yield end 帧 ✅
+
+    ★ 五类意图（2026-10-25 新增 guide_scaffold）：
+        ask_answer     "这题答案是多少"   → guide_scaffold（不给答案，先引导）
+        guide_scaffold "这题考什么/没思路/给点提示" → guide_scaffold（直接进引导）
+        submit_answer  提交自己的作答      → grade_submit
+        explain        "讲解一下/详细讲讲"  → explain_concept
+        off_topic      与本题无关的闲聊     → respond
     """
     # 身份校验
     _own_student_or_admin(db, user, body.student_id)

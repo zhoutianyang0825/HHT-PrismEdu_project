@@ -23,9 +23,9 @@ class StudentAgentState(TypedDict):
     messages: Annotated[list, add_messages]
 
     # ---- 路由决策 ----
-    # intent 四类路由（开发计划 M2-T1）：求答案 / 提交作答 / 要讲解 / 闲聊
-    # 四选1
-    intent: Literal["ask_answer", "submit_answer", "explain", "off_topic"]
+    # intent 五类路由（开发计划 M2-T1）：求答案 / 要引导提示 / 提交作答 / 要讲解 / 闲聊
+    # 五选1
+    intent: Literal["ask_answer", "guide_scaffold", "submit_answer", "explain", "off_topic"]
 
     # ---- 安全过滤（入口层，PRD 2.4）----
     blocked_reason: str          #  "" = 空，放行； "检测到 prompt 注入尝试" = 非空，被安全过滤拦截，直接走兜底回复
@@ -40,6 +40,7 @@ class StudentAgentState(TypedDict):
     # ---- 引导状态 ----
     attempt_count: int           # 已引导轮数，上限 3（第 3 轮给完整讲解）
     hint_level: int              # 提示阶梯：1 方向 → 2 步骤 → 3 关键公式
+    force_explain: bool          # True=引导已用尽，要给完整解答（讲解节点据此决定是否留最后一步）
 
     # ---- 作答与判分（M2 简版规则判分；M3 换 grading.py 完整服务）----
     current_answer: str

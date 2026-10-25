@@ -1,0 +1,33 @@
+{"text": "-3", "intent": "submit_answer"}
+{"text": "15   -15", "intent": "submit_answer"}
+{"text": "3", "intent": "submit_answer"}
+{"text": "3 5", "intent": "submit_answer"}
+{"text": "5/4", "intent": "submit_answer"}
+{"text": "x=2 或 x =3", "intent": "submit_answer"}
+{"text": "x=2或3", "intent": "submit_answer"}
+{"text": "x=3,x=5", "intent": "submit_answer"}
+{"text": "x=5或x=1", "intent": "submit_answer"}
+{"text": "x_1=2，x_2=3", "intent": "submit_answer"}
+{"text": "不会", "intent": "guide_scaffold"}
+{"text": "不会写", "intent": "guide_scaffold"}
+{"text": "不会，直接做出来给我看下", "intent": "ask_answer"}
+{"text": "不需要给我提示，直接讲解这道题", "intent": "explain"}
+{"text": "你有病？", "intent": "off_topic"}
+{"text": "怎么做", "intent": "guide_scaffold"}
+{"text": "我完全没有思路，你跟我讲解下", "intent": "explain"}
+{"text": "查看完整解析", "intent": "explain"}
+{"text": "直接告诉我答案", "intent": "ask_answer"}
+{"text": "直接讲解", "intent": "explain"}
+{"text": "直接讲解并告诉我最后答案", "intent": "explain"}
+{"text": "直接跟我讲解下这道题", "intent": "explain"}
+{"text": "答案", "intent": "ask_answer"}
+{"text": "答案‘", "intent": "ask_answer"}
+{"text": "答案是：5/4", "intent": "submit_answer"}
+{"text": "答案看不懂", "intent": "explain"}
+{"text": "考啥", "intent": "guide_scaffold"}
+{"text": "讲解一下", "intent": "explain"}
+{"text": "讲解下", "intent": "explain"}
+{"text": "还是不会", "intent": "guide_scaffold"}
+{"text": "还是不会，直接讲解", "intent": "explain"}
+{"text": "还是没有思路", "intent": "guide_scaffold"}
+{"text": "这题考什么", "intent": "guide_scaffold"}

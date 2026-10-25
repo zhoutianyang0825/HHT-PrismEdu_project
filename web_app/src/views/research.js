@@ -8,7 +8,7 @@
  * 通道纪律（PRD 2.3）：本端只走 aggregate 聚合通道，接口层面没有学生明细。
  * ========================================================================== */
 import {
-  http, toast, esc, busy, pct, fixed, emptyState, errorBox,
+  http, toast, esc, md, mdInline, busy, pct, fixed, emptyState, errorBox,
 } from "../core.js";
 import { kpName } from "../kp-names.js";
 import { radar, barRows, barChart } from "../charts.js";
@@ -447,7 +447,7 @@ function analysisHTML(ana) {
         <span class="pill pill-green">已写回 ${ana.abnormal_written ?? 0} 道</span>
       </div>
       ${report.overview ? `<div class="alert alert-info" style="margin-top:14px"><span class="dot"></span>
-        <div>${esc(report.overview)}</div></div>` : ""}
+        <div class="md">${md(report.overview)}</div></div>` : ""}
 
       <div class="tiny" style="margin:18px 0 8px">逐题指标（P 越低越难，D 越低区分度越差）</div>
       <div class="table-wrap" style="max-height:320px;overflow:auto">
@@ -478,8 +478,8 @@ function analysisHTML(ana) {
             <div class="list-row" style="align-items:flex-start">
               <span class="pill pill-red">#${it.q_id}</span>
               <div class="grow">
-                <div class="title" style="font-size:13.5px">${esc(it.issue || "")}</div>
-                <div class="meta" style="line-height:1.65">P=${fixed(it.P, 2)} · D=${fixed(it.D, 2)} · ${esc(kpName(it.kp_id))}<br/>${esc(it.cause || "")}</div>
+                <div class="title" style="font-size:13.5px">${mdInline(it.issue || "")}</div>
+                <div class="meta" style="line-height:1.65">P=${fixed(it.P, 2)} · D=${fixed(it.D, 2)} · ${esc(kpName(it.kp_id))}<br/>${mdInline(it.cause || "")}</div>
               </div>
             </div>`).join("") || emptyState("没有异常题", "指标全部落在正常区间", "check")}
         </div>
@@ -492,7 +492,7 @@ function analysisHTML(ana) {
           ${(report.teaching_suggestions || []).map((s) => `
             <div class="list-row" style="align-items:flex-start">
               <span class="pill pill-green">建议</span>
-              <div class="grow" style="font-size:13.5px;line-height:1.7">${esc(s)}</div>
+              <div class="grow" style="font-size:13.5px;line-height:1.7">${mdInline(s)}</div>
             </div>`).join("") || emptyState("暂无建议", "", "sparkle")}
         </div>
         <div class="divider"></div>

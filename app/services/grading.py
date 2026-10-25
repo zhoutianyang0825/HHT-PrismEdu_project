@@ -10,10 +10,32 @@ from contextlib import contextmanager
 
 
 # =====================================================================
+# 下标数字：Unicode 下标 ↔ ASCII 数字
+# =====================================================================
+# 场景实测：
+#   讲解里写 "x_1=______"，标准答案存 "x1=2"，学生照抄 "x_1=2"，
+#   归一化后 "x_1=2" ≠ "x1=2" → 明明答对却判错。
+#   下标写法至少三种：x_1（LaTeX/纯文本）、x₁（Unicode 下标）、x1（纯 ASCII），
+#   判分时必须视作同一个东西。
+SUBSCRIPT_CHARS = "₀₁₂₃₄₅₆₇₈₉"
+_SUPERSCRIPT_CHARS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+
+# 下标数字 → ASCII 数字
+_SUBSCRIPT_MAP = {ch: str(i) for i, ch in enumerate(SUBSCRIPT_CHARS)}
+# ASCII 数字 → 下标数字（显示用：x1 → x₁）
+_SUBSCRIPT_REVERSE = {str(i): ch for i, ch in enumerate(SUBSCRIPT_CHARS)}
+# ASCII 数字 → 上标数字（显示用：x2 → x²）
+_SUPERSCRIPT_REVERSE = {str(i): ch for i, ch in enumerate(_SUPERSCRIPT_CHARS)}
+
+# 预编译：匹配一个 Unicode 下标数字
+_SUBSCRIPT_DIGITS = re.compile("[" + SUBSCRIPT_CHARS + "]")
+
+
+# =====================================================================
 # 第 1 层：答案归一化——判分前先消灭格式噪音
 # =====================================================================
 def normalize(text: str) -> str:
-    """答案归一化：全角→半角、去空格/美元符/LaTeX 包裹、转小写。
+    """答案归一化：全角→半角、去空格/美元符/LaTeX 包裹、写下标、转小写。
 
     得到的数据：任意形态的答案字符串，类似 " （X−2)(X−3) "
     要做的操作：逐类替换格式差异，只留语义内容
@@ -30,10 +52,21 @@ def normalize(text: str) -> str:
     # 去掉所有空白（含中间空格）
     t = re.sub(r"\s+", "", t)
 
-    # 全角 → 半角（括号/等号/逗号/减号是数学答案重灾区）
+    # 全角 → 半角（括号/等号/逗号/分号/减号是数学答案重灾区）
+    # ★ 分号必须转：全角"；"不清掉的话，后面按 [;；] 切空那一步切不开，
+    #   "10；7" 会漏到多值集合比对那层 → 韦达题（两个不同的量，顺序有关）
+    #   会被误判成"顺序无关"而放过错误答案。
     for full, half in [("（", "("), ("）", ")"), ("＝", "="),
-                       ("，", ","), ("－", "-"), ("．", "."), ("：", ":")]:
+                       ("，", ","), ("；", ";"), ("－", "-"),
+                       ("．", "."), ("：", ":")]:
         t = t.replace(full, half)
+
+
+    # ★ 变量下标归一化：x_1 / x₁ / x1 三种写法是同一个东西
+    #   做法：把 Unicode 下标数字先转成 ASCII，再去掉下划线 → "x1"
+    t = _SUBSCRIPT_DIGITS.sub(lambda m: str(_SUBSCRIPT_MAP[m.group(0)]), t)
+    t = re.sub(r"([a-z])_(\d)", r"\1\2", t)     # x_1 → x1
+    t = t.replace("_", "")                      # 兜底：残留的孤立下划线
 
     return t
 
@@ -62,7 +95,7 @@ def _sympy_timeout(seconds: int = 3):
     except ValueError:
         old = None            # 非主线程：装不上闹钟，静默降级
     try:
-        yield
+        yield                 # yield 是 contextmanager的锚点，先执行yield前代码，然后再执行yield后代码
     finally:
         if old is not None:
             signal.alarm(0)   # 取消闹钟
@@ -73,8 +106,11 @@ def expr_equal(student: str, standard: str) -> bool:
     """判断两个表达式是否数学等价：simplify(学生式 - 标准式) == 0。
 
     得到的数据：两个数学表达式字符串，一个学生写的，一个标答的，类似 "x+1" 与 "1+x"
+
     要做的操作：剥变量前缀 → ^ 转 ** → parse_expr 解析 → 差值化简看是否恒为 0
+
     返回：True=数学上等价（如 (x-2)(x-3) 与 x^2-5x+6）；False=不等价或解析失败
+    
     为什么：等价写法（x+1 与 1+x、展开式与因式积）不该判错；
             解析失败/超时一律 False——宁可误判错也别把错判对
     """
@@ -93,12 +129,14 @@ def expr_equal(student: str, standard: str) -> bool:
     # 对 学生回答 和 标答，进行sympy的转换，转化以后，比较两个回答的差值
     try:
         with _sympy_timeout(3):     # 进入上下问管理器
-            
-            #   standard_transformations     基础规则（自动有理数、切分符号等）
-            #       + 
-            #   implicit_multiplication_application 隐式乘法/函数调用：
-            #     没有它 "5x" 会被解析成符号名 "5x" 直接报错；
-            #     加了它 5x→5*x、2(x+1)→2*(x+1)，学生手写习惯才能被认出来
+            """
+              standard_transformations     基础规则（自动有理数、切分符号等）
+                  + 
+              implicit_multiplication_application 隐式乘法/函数调用：
+
+              没有它 "5x" 会被解析成符号名 "5x" 直接报错；
+              加了它 5x→5*x、2(x+1)→2*(x+1)，学生手写习惯才能被认出来
+            """
             from sympy.parsing.sympy_parser import (
                 implicit_multiplication_application,
                 parse_expr,
@@ -106,7 +144,7 @@ def expr_equal(student: str, standard: str) -> bool:
             )
             from sympy import simplify
 
-            # 陌生参数 transformations：sympy 解析器的"预处理规则集"。由2个规则组合
+            # transformations：sympy 解析器的"预处理规则集"。由2个规则组合
             transformations = standard_transformations + (implicit_multiplication_application,)
             lhs = parse_expr(a, transformations=transformations, evaluate=True)
             rhs = parse_expr(b, transformations=transformations, evaluate=True)
@@ -159,16 +197,114 @@ def _expand_alternatives(standard: str) -> list[str]:
     return variants # ["x=1", "x=-1"]
 
 
-def grade_fill(student: str, standard: str) -> bool:
-    """填空题判分：精确匹配 → 等价变体 → 表达式等价，三层递进。
+# =====================================================================
+# 第 3.5 层：多值答案按"值的集合"比对（顺序无关）
+# =====================================================================
+# 场景（2026-10-25 老大实测）：
+#   题库标答写成 "x1=2，x2=3"（逗号分隔、变量带下标编号），
+#   学生答成 "x=2或x=3"（"或"分隔、变量不带编号）——数学上完全等价，
+#   但字符串比不出来 → 明明答对却判错。
+#
+# 做法：两边都拆成若干"组成部分"，每部分取出一个数值，
+#       当作集合比较（顺序无关，x1=3,x2=2 与 x1=2,x2=3 是同一组根）。
+# 安全阀：两部分数量必须相同、每部分都必须能解析出一个纯数值，
+#         否则本层不生效（宁可不判，也别把错的判对）。
 
-    得到的数据：学生作答、标准答案，类似 "(x-2)(x-3)" / "{2|-2}"
+# 答案组成部分的分隔符：逗号 / 分号 / 顿号 / "或"（中文"或者"要排在"或"前面）
+_ANSWER_SEP = re.compile(r"或者|或|[，,；;、]")
+
+# 纯数值：可带正负号和小数
+_PURE_NUMBER = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
+
+# 变量名 + 编号：x1 / x2 / x₁（判定"这是根的编号"还是"这是不同的量"）
+_ROOT_LABEL = re.compile(r"^x[₀-₉0-9]+$")
+
+
+def _split_answer_parts(text: str) -> list[str]:
+    """把一个答案串拆成多个组成部分。
+
+    得到的数据：已归一化的答案串，类似 "x1=2,x2=3" / "x=2或x=3"
+    要做的操作：按逗号/分号/顿号/"或"切分，丢掉空段
+    返回：组成部分列表，如 ["x1=2", "x2=3"]
+    """
+    return [p for p in _ANSWER_SEP.split(text) if p]
+
+
+def _extract_number(part: str) -> str | None:
+    """从一个组成部分里取出数值。
+
+    得到的数据：组成部分，如 "x1=2" / "x=2" / "2" / "-5"
+    要做的操作：有 "=" 就取等号右边（丢掉变量名），否则整段当数值
+    返回：数值文本（"2" / "-5" / "0.5"）；不是纯数值时返回 None
+    为什么：标答的 "x1=2" 和学生的 "x=2" 差的就是变量名，比数值才对得上
+    """
+    if "=" in part:
+        part = part.rpartition("=")[2]
+    part = part.strip()
+    return part if _PURE_NUMBER.match(part) else None
+
+
+def _is_root_label(part: str) -> bool:
+    """判断一个组成部分的变量名是不是"根的编号"（x1 / x2 / x₁）。
+
+    得到的数据：组成部分的等号左侧，如 "x1" / "x2" / "x"
+    要做的操作：匹配 "x + 数字" 的模式
+    返回：True=是根编号；False=是别的量（如韦达题里的两个不同量）
+    为什么：★ 这是顺序语义的分水岭——
+        根（x1=2，x2=3）是同一组解，顺序无关，反了也算对；
+        而韦达题（"x1+x2=7；x1·x2=10"）两个空是**不同的量**，顺序有关，
+        答 "10；7" 必须判错。靠"变量名是不是 x+编号"来区分这两类题。
+    """
+    if "=" not in part:
+        return False
+    left = part.rpartition("=")[0].strip()
+    return bool(_ROOT_LABEL.match(left))
+
+
+def _values_match(student: str, standard: str) -> bool:
+    """多值答案比对：根的顺序无关，不同量的顺序有关。
+
+    得到的数据：已归一化的学生答案与标答
+    要做的操作：
+      1. 两边按分隔符拆组成部分，数量必须相同且 >1
+      2. 每部分都必须能解析出纯数值（任一解析不出 → 本层不生效）
+      3. ★ 分两种语义：
+         - 标答是"根"（x1=2，x2=3）→ 数值集合相同即对（根的编号顺序无所谓）
+         - 标答不是"根"（韦达题的 7；10）→ 按顺序逐位比（两个空是不同的量）
+    返回：True=答案对；False=不同，或本层不适用
+    """
+    s_parts = _split_answer_parts(student)
+    t_parts = _split_answer_parts(standard)
+    if len(s_parts) != len(t_parts) or len(s_parts) <= 1:
+        return False
+
+    s_vals = [_extract_number(p) for p in s_parts]
+    t_vals = [_extract_number(p) for p in t_parts]
+    if any(v is None for v in s_vals) or any(v is None for v in t_vals):
+        return False
+
+    s_nums = [float(v) for v in s_vals]
+    t_nums = [float(v) for v in t_vals]
+
+    # 标答是"根"语义 → 集合比对（顺序无关）
+    if all(_is_root_label(p) for p in t_parts):
+        return sorted(s_nums) == sorted(t_nums)
+
+    # 标答是"不同的量"（韦达题等）→ 顺序比对（顺序有关）
+    return s_nums == t_nums
+
+
+def grade_fill(student: str, standard: str) -> bool:
+    """填空题判分：精确匹配 → 等价变体 → 表达式等价，多值再按集合比，四层递进。
+
+    得到的数据：学生作答、标准答案，类似 "(x-2)(x-3)" / "{2|-2}" / "x1=2，x2=3"
     要做的操作：
       1. 归一化后精确相等 → 判对
       2. 展开标答 {a|b} 等价语法逐个再比 -- （值相等 或者 表达式等价expr_equal）
       3. 一题多空按序比对：按 "；/;" 切开逐空比 -- （值相等 或者 表达式等价expr_equal）
+      4. 多值答案按数值集合比（"x=2或x=3" vs "x1=2，x2=3" 这类写法差异）
     返回：True / False
-    为什么：填空题的"正确答案"形态最杂（多空、等价、未化简），必须逐层放宽，
+    为什么：填空题的"正确答案"形态最杂（多空、等价、未化简、写法不一），必须逐层放宽，
             但每一层都是确定性规则，不做模糊匹配
     """
     # 层 1：归一化后，比对，相等返回true
@@ -179,7 +315,7 @@ def grade_fill(student: str, standard: str) -> bool:
     # 层 2：等价变体（{a|b} 语法）
     for variant in _expand_alternatives(standard):
         v = normalize(variant)
-        if s == v or expr_equal(s, v):  
+        if s == v or expr_equal(s, v):
             return True
 
     # 层 3：一题多空按序比对（中文分号/英文分号切空）
@@ -190,7 +326,11 @@ def grade_fill(student: str, standard: str) -> bool:
             sb == tb or expr_equal(sb, tb) for sb, tb in zip(s_blanks, t_blanks)  # 值相等 或者 表达式等价
         )
 
-    # 层 3 之外的兜底：单空但形态是表达式（如 (x-2)(x-3) vs x^2-5x+6）
+    # 层 4：多值答案按数值集合比（"x=2或x=3" vs "x1=2，x2=3"）
+    if _values_match(s, t):
+        return True
+
+    # 层 4 之外的兜底：单空但形态是表达式（如 (x-2)(x-3) vs x^2-5x+6）
     return expr_equal(s, t)  # 纯表达式比对
 
 

@@ -9,7 +9,7 @@
  * 下一次输入走 /resume，否则走 /answer/stream（后端另有兜底，双保险）。
  * ========================================================================== */
 import {
-  http, streamChat, toast, esc, busy, pct, fixed, dateOf, clip, greeting,
+  http, streamChat, toast, esc, md, busy, pct, fixed, dateOf, clip, greeting,
   levelOf, emptyState, errorBox, shortName,
 } from "../core.js";
 import { radar, barRows } from "../charts.js";
@@ -362,7 +362,7 @@ function messageNode(m) {
           <path d="M4 16h12M6 16V9M10 16V5M14 16v-4"/></svg>
         引导提示${m.meta ? ` · 第 ${m.meta} 次` : ""}
       </div>
-      <div class="body">${esc(m.text)}</div>`;
+      <div class="body md">${md(m.text)}</div>`;
     return node;
   }
   if (m.kind === "error") {
@@ -376,7 +376,7 @@ function messageNode(m) {
     return node;
   }
   node.className = "msg msg-ai";
-  node.innerHTML = `<span class="avatar">棱</span><div class="bubble">${esc(m.text)}</div>`;
+  node.innerHTML = `<span class="avatar">棱</span><div class="bubble md">${md(m.text)}</div>`;
   return node;
 }
 

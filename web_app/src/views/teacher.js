@@ -10,7 +10,7 @@
  * 前端只负责把「不在你任教范围」的 403 原文透出来。
  * ========================================================================== */
 import {
-  http, toast, esc, busy, pct, fixed, dateOf, clip,
+  http, toast, esc, md, mdInline, busy, pct, fixed, dateOf, clip,
   emptyState, errorBox,
 } from "../core.js";
 import { kpName } from "../kp-names.js";
@@ -228,9 +228,9 @@ function suggestHTML(sug, answerId) {
       <b>${fixed(sug.ai_score, 1)}</b>
       <span class="muted">/ ${fixed(sug.full_score, 0)} 分</span>
     </div>
-    <div style="margin-top:10px;font-size:13.5px;line-height:1.7">${esc(sug.ai_comment || "（无评语）")}</div>
+    <div style="margin-top:10px;font-size:13.5px;line-height:1.7" class="md">${md(sug.ai_comment || "（无评语）")}</div>
     ${(sug.scoring_basis || []).length ? `<ul class="basis">
-      ${sug.scoring_basis.map((b) => `<li>${esc(b)}</li>`).join("")}
+      ${sug.scoring_basis.map((b) => `<li>${mdInline(b)}</li>`).join("")}
     </ul>` : ""}
 
     <div class="decision">

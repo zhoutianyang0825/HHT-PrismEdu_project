@@ -475,6 +475,9 @@ button { font: inherit; color: inherit; }
 .msg-ai .avatar { background: #fff; border-color: var(--line); }
 .msg-error .bubble { background: var(--red-soft); color: #a40010; }
 
+/* AI 讲解气泡：走 .md 渲染后必须脱离 pre-wrap，否则块级元素之间会多出空行 */
+.msg .bubble.md, .hint-card .body.md { white-space: normal; }
+
 .hint-card {
   align-self: flex-start; max-width: 86%;
   border: 1px solid rgba(0, 113, 227, 0.16); background: var(--blue-soft);
@@ -483,6 +486,48 @@ button { font: inherit; color: inherit; }
 }
 .hint-card .cap { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: #0059b3; letter-spacing: 0.03em; margin-bottom: 7px; }
 .hint-card .body { font-size: 14px; line-height: 1.68; white-space: pre-wrap; color: var(--ink); }
+
+/* ============================================================================
+   Markdown 渲染（core.js 的 md() 产物）
+   设计取向：讲解是"给学生读的"，所以层级靠留白和字重拉开，不靠花哨颜色。
+   ========================================================================== */
+.md .md-p { margin: 0; }
+.md .md-p + .md-p { margin-top: 2px; }
+.md .md-gap { height: 9px; }
+.md .md-sub {
+  margin: 10px 0 3px; font-size: 13.5px; font-weight: 650; line-height: 1.55;
+  color: var(--ink); letter-spacing: 0.01em;
+}
+.md .md-sub:first-child { margin-top: 0; }
+.md .md-h {
+  margin: 12px 0 4px; font-size: 14px; font-weight: 650; line-height: 1.5;
+  color: var(--ink); letter-spacing: 0.01em;
+}
+.md .md-h:first-child { margin-top: 0; }
+.md strong { font-weight: 650; color: var(--ink); }
+.md em { font-style: normal; color: var(--ink-2); }
+.md ul, .md ol { margin: 4px 0 6px; padding-left: 20px; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li { margin: 3px 0; padding-left: 2px; line-height: 1.7; }
+.md li::marker { color: var(--ink-3); }
+.md .md-li-cont { margin-top: 2px; color: var(--ink-2); }
+.md .md-quote {
+  margin: 6px 0; padding: 6px 12px; border-left: 3px solid var(--blue);
+  background: rgba(0, 113, 227, 0.05); border-radius: 0 8px 8px 0;
+  color: var(--ink-2);
+}
+.md .md-code {
+  margin: 6px 0; padding: 10px 12px; border-radius: 10px;
+  background: rgba(0, 0, 0, 0.04); border: 1px solid var(--line);
+  font-size: 12.5px; line-height: 1.6; overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+}
+.md .md-icode {
+  padding: 1px 5px; border-radius: 5px; background: rgba(0, 0, 0, 0.05);
+  font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 .typing { align-self: flex-start; display: flex; gap: 5px; padding: 13px 16px; background: var(--bg-soft); border-radius: 15px; }
 .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); animation: blink 1.2s infinite; }

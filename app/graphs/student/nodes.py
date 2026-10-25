@@ -211,6 +211,7 @@ def guide_scaffold(state: StudentAgentState, *, config, store) -> dict:
                        "先讲思路，再一步步写出解答，最后总结方法。"),
             ("human", f"题目：{question.content}\n参考解析：{question.analysis or '无'}"),
         ])
+        # 引导完产出最终回复时，走的是AIMessage
         return {"messages": [AIMessage(content=full.content)]}
 
 

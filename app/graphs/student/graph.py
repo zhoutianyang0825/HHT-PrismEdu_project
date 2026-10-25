@@ -97,7 +97,7 @@ def build_student_graph(
     builder = StateGraph(StudentAgentState) # 初始化一张空图
 
     builder.add_node("safety_check", safety_check)
-    builder.add_node("classify_intent", classify_intent)
+    builder.add_node("classify_intent", classify_intent)  # 意图识别
     builder.add_node("guide_scaffold", guide_scaffold)    # 引导作答
     builder.add_node("explain_concept", explain_concept)  # 生成讲解节点，rag检索
     builder.add_node("grade_submit", grade_submit)        # 提交作答

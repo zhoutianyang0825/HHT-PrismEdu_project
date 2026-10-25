@@ -93,7 +93,9 @@ def _own_student_or_admin(db: Session, user: CurrentUser, student_id: int) -> St
     """self 通道守卫：当前用户必须是这个 student_id 档案的主人（或 admin）。
 
     得到的数据：body 里的 student_id（students.id）
+
     要做的操作：查档案 → 比对 user_id
+
     不满足会怎样：403。学生 A 拿自己的 token 查学生 B 的掌握度，在这里被拦下。
     """
     profile = db.get(Student, student_id)
@@ -155,8 +157,16 @@ def _stream_graph_events(graph, graph_input, config):
 
             node_name, diff = next(iter(chunk.items()))
 
-            # respond 是统一出口节点：diff.messages 最后一条就是给学生的最终回复
-            if node_name == "respond" and diff.get("messages"):
+            
+            #   前2轮引导时，respond 节点都是无增量消息的状态（因为“讲解终稿”是第3轮引导才出的答案），那么 LangGraph的updates 模式下吐出来的 chunk 是 {节点名: None} 
+            #   所以 diff 可能是 None，直接 diff.get() 会炸 AttributeError: 'NoneType' object has no attribute 'get'。
+            #   所以这里必须先判 None，对None进行处理 → 不发帧，继续下一个 chunk 。
+            #   补一句精确的触发点：真正踩坑的是"讲解终稿已产出"那一刻（讲解路径 / 引导第 3 轮出终稿），
+            #   此时 respond 判到 messages[-1] 已是 AIMessage 就 return {}；前 2 轮图停在 interrupt 上，respond 根本不执行。
+            if node_name == "respond":
+                if not isinstance(diff, dict) or not diff.get("messages"):
+                    continue
+
                 last = diff["messages"][-1]
                 content = last.content if isinstance(last, AIMessage) else str(last)
 
@@ -200,7 +210,8 @@ def answer_stream(
         t2  safety_check → classify_intent = ask_answer ✅
 
         t3  guide_scaffold：LLM 生成第 1 层提示 → interrupt(payload) 挂起
-            └ yield interrupt 帧（前端显示提示）→ 本次请求结束 ✅
+            └ yield interrupt 帧（前端显示提示）→ ⚠️ guide_scaffold函数栈 在interrupt处挂起，此时不会执行respond节点
+
         t3' 学生 resume 输入作答 → guide_scaffold 续跑记入 HumanMessage ✅
 
         t4  回 classify_intent 重新分类 → "提交作答" → grade_submit ✅
@@ -216,8 +227,9 @@ def answer_stream(
             └ classify_intent = explain → explain_concept（RAG+LLM）
             └ 讲解 AIMessage 增量 → yield message 帧（补丁后能正常发到前端）✅
 
-        t7  respond 空过（末条已是 AIMessage）→ END → yield end 帧 ✅
+        t7  respond 空过（满3轮引导后，第4轮 guide_scaffold 函数的产出已是 AIMessage，直接空过透传{}）→ END → yield end 帧 ✅
     """
+    # 身份校验
     _own_student_or_admin(db, user, body.student_id)
 
     graph = _get_student_graph()
@@ -228,7 +240,7 @@ def answer_stream(
     # 因为图都挂了checkpointer，所以先查：当前thread上，有没有interrupt挂起
     snap = _graph_state(graph, config)
 
-    # 如果snap.next 非空，包 Command(resume=message) 进interrupt
+    # 如果snap.next 非空，包 Command(resume=message)的值，进原先的interrupt
     if snap.next:
         gen = _stream_graph_events(graph, Command(resume=body.message), config)
 
@@ -246,7 +258,7 @@ def answer_stream(
     return StreamingResponse(gen, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-
+ 
 @router.post("/resume")
 def resume(body: StudentResumeIn, user: CurrentUser = Depends(get_current_user),
            db: Session = Depends(get_db)):

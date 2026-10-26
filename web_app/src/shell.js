@@ -14,6 +14,7 @@ import { icon, esc, ROLE_LABEL } from "./core.js";
 export const NAV = {
   student: [
     { tab: "overview", label: "概览", ico: "home" },
+    { tab: "exam", label: "考试", ico: "file" },
     { tab: "mastery", label: "掌握度", ico: "chart" },
     { tab: "assistant", label: "学习助手", ico: "chat" },
     { tab: "quiz", label: "诊断测验", ico: "target" },

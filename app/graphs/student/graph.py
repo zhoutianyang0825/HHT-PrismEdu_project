@@ -56,7 +56,7 @@ def route_by_intent(state: StudentAgentState) -> str:
         "guide_scaffold": "guide_scaffold", # 学生主动要思路/提示（这题考什么/没思路/给点提示）→ 走引导
         "submit_answer": "grade_submit",    # 答案提交
         "explain": "explain_concept",       # 明确要求讲解/解析 → 启动讲解
-        "off_topic": "respond",
+        "off_topic": "respond",             # 闲聊直接走respond
     }[state["intent"]]
 
 
@@ -128,10 +128,11 @@ def build_student_graph(
     builder.add_conditional_edges(
         "classify_intent", route_by_intent,
         {
+            # 这里的 key 是 route_by_intent 的返回值（节点名），不是意图名。
             "guide_scaffold": "guide_scaffold",
             "grade_submit": "grade_submit",
             "explain_concept": "explain_concept",
-            "respond": "respond",
+            "respond": "respond",       # off_topic（闲聊/跑题）也走这里
         },      # 允许的路径声明
     )
 

@@ -28,6 +28,9 @@ M4-T3 · R-04 考后分析 crew：三个角色顺序协作。
   数字不经过模型的手，这个风险归零。模型只负责"为什么/怎么补"这类表达型工作。
 """
 
+import json
+import re
+
 from app.crews.llm_bridge import get_crewai_llm, to_crewai_tools
 from app.schemas.analysis import AnalysisReport
 from app.services.analysis import metrics_context_for_crew
@@ -134,15 +137,25 @@ def build_analysis_crew(metrics: list[dict], title: str = "", grade: str = ""):
     t_advice = Task(
         description=(
             "汇总数据分析师与命题质量专家的结论，输出最终教研报告。"
-            "teaching_suggestions 每条一句话、可执行、落到知识点和班级。"
+            "teaching_suggestions 每条一句话、可执行、落到知识点和班级。\n"
+            "★ 只输出一个 JSON 对象：不要 markdown 代码块（```json）、不要任何解释性文字。"
         ),
-        expected_output="符合 AnalysisReport schema 的结构化 JSON",
+        expected_output=(
+            "严格符合下面 JSON Schema 的单个 JSON 对象（字段名、层级都要对上）：\n"
+            + json.dumps(AnalysisReport.model_json_schema(), ensure_ascii=False)
+        ),
         agent=research_lead,
         # 两个上游都要吃：概况来自 ①，成因来自 ②
         context=[t_analyze, t_diagnose],
-        # ★ output_pydantic：末位任务卡格式。
-        #   模型返回会先过 Pydantic 校验，字段缺失/类型不符都会失败（由 run_paper_analysis 兜底）。
-        output_pydantic=AnalysisReport,
+        # 🔴 故意不用 output_pydantic：
+        #   CrewAI 1.15 会把 output_pydantic 直接当成执行器的 response_model
+        #   （agent/core.py: response_model = task.response_model or task.output_pydantic），
+        #   于是走 openai 的 beta.chat.completions.parse，发
+        #   response_format={"type":"json_schema", ...}。
+        #   我们的 DashScope 兼容端点（deepseek-v4-flash）不支持 json_schema，直接 400：
+        #   "This response_format type is unavailable now"。
+        #   所以改成"提示词里给 schema + 本地 model_validate_json 校验"，
+        #   零依赖模型厂商的结构化能力。
     )
 
 
@@ -156,6 +169,68 @@ def build_analysis_crew(metrics: list[dict], title: str = "", grade: str = ""):
     )
 
 
+
+
+def _extract_json(raw: str) -> str:
+    """从模型输出里抠出 JSON 本体。
+
+    得到的数据：可能是 "```json\n{...}\n```"、也可能是"以下是报告：\n{...}\n希望有帮助"
+
+    要做的操作：
+        t1 剥掉 markdown 代码围栏
+        t2 按第一个 { 到最后一个 } 截断（模型爱在 JSON 前后加客套话）
+
+    返回：一段可直接 model_validate_json 的文本
+
+    为什么：CrewAI 的 output_pydantic 走不通（见 t_advice 的注释），
+            于是"保证格式"的责任回到我们手里，这一步就是格式兼容层。
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return text
+
+
+def _parse_report(raw: str) -> AnalysisReport | None:
+    """把 crew 的原始输出解析成 AnalysisReport，两条路都失败才返回 None。
+
+    得到的数据：raw = crew.kickoff().raw
+
+    要做的操作：
+        t1 剥格式 → AnalysisReport.model_validate_json（一次就中就不花额外 token）
+        t2 不中 → 走项目统一的 invoke_structured（json_mode → function_calling → 手写解析）
+        t3 还不中 → None，交给调用方走本地降级
+
+    返回：AnalysisReport 或 None
+
+    为什么不用 CrewAI 的 .pydantic：
+        那条路会让框架给模型发 response_format=json_schema，DeepSeek 端点直接 400。
+        invoke_structured 是项目里已经踩过坑、准确率 97% 的那条适配层，复用它最稳。
+    """
+    text = _extract_json(raw)
+
+    try:
+        return AnalysisReport.model_validate_json(text)
+    except Exception:
+        pass
+
+    try:
+        from app.core.llm import get_llm
+        from app.core.structured import invoke_structured
+
+        return invoke_structured(
+            get_llm(temperature=0),
+            AnalysisReport,
+            [("system", "把下面这份教研报告整理成指定 JSON 结构，事实不许增减或编造。"),
+             ("human", raw or "")],
+        )
+    except Exception:
+        return None
 
 
 def run_paper_analysis(metrics: list[dict], title: str = "", grade: str = "") -> AnalysisReport:
@@ -174,12 +249,20 @@ def run_paper_analysis(metrics: list[dict], title: str = "", grade: str = "") ->
     crew = build_analysis_crew(metrics, title=title, grade=grade)
     result = crew.kickoff()          # kickoff执行：这里开始花 token + 查库
 
-    if result.pydantic is not None:
-        return result.pydantic       # 正常路径：Pydantic 校验通过的干净对象
+    # 某些路径下 CrewAI 仍会给出结构化对象（比如模型恰好支持 json_schema）
+    if getattr(result, "pydantic", None) is not None:
+        return result.pydantic
 
-    # 降级：result.raw 是模型最后输出的原文（一段可能不合法的 JSON 或纯文本），就会出现pydantic校验失败，那么需要人工降级格式化输出
+    raw = getattr(result, "raw", str(result)) or ""
+
+    parsed = _parse_report(raw)
+    if parsed is not None:
+        return parsed
+
+    # 降级：结构化彻底失败时，用本地指标重建"能保的事实"，
+    # 原文附在 overview 里，人工仍能看到模型写了什么
     return AnalysisReport(
-        overview=f"[结构化输出失败，原始文本如下]\n{result.raw}",
+        overview=f"[结构化输出失败，原始文本如下]\n{raw}",
         abnormal_items=[
             {"q_id": r["q_id"], "kp_id": r.get("kp_id", "unknown"),
              "P": r["P"], "D": r["D"], "issue": "、".join(r["issues"]), "cause": "待人工复核"}

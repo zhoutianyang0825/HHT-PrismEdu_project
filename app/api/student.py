@@ -1,6 +1,6 @@
 """
 app/api/student.py
-M5-T1/T2 · 学生端：SSE 流式引导 + interrupt resume + S-10 诊断测验。
+M5-T1/T2 · 学生端：SSE 流式引导 + interrupt resume + S-10 诊断测验 + M7 考试模块。
 
 🔴 本文件是 M5 最关键的两个打通之一（另一个在 teacher.py）：
   LangGraph 的 interrupt 挂起 / Command(resume) 恢复，如何跨 HTTP 请求工作——
@@ -22,16 +22,26 @@ M5-T1/T2 · 学生端：SSE 流式引导 + interrupt resume + S-10 诊断测验�
 【身份守卫】
   学生只能操作自己（self scope）：body.student_id 必须等于当前 JWT 用户的学生档案 id。
   admin 代演放行。这就是"越权守卫挂载"在数据层的落地。
+
+【M7 考试模块（本文件下半段）】
+  教研端定稿 → 推送班级（exam_paper_classes）→ 学生在这四步里完成一场考试：
+    GET  /exams               我被推了哪些卷、交没交、多少分
+    GET  /exams/{id}          题目（脱敏）+ 我已填的答案
+    POST /exams/{id}/submit   交卷：逐题落库 → 客观题立刻判 → 建考试记录
+    POST /upload/answer-image 手写解题步骤拍图上传（base64）
 """
 
 from functools import lru_cache
+import base64
 import json
+import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, get_current_user
@@ -40,6 +50,8 @@ from app.models import (
     BKTState,
     Chapter,
     DiagnosticQuiz,
+    ExamPaper,
+    ExamPaperQuestion,
     Homework,
     HomeworkQuestion,
     KnowledgePoint,
@@ -47,7 +59,13 @@ from app.models import (
     Student,
     StudentAnswer,
 )
-from app.schemas.api import QuizSubmitIn, StudentChatIn, StudentResumeIn
+from app.schemas.api import (
+    ExamSubmitIn,
+    ImageUploadIn,
+    QuizSubmitIn,
+    StudentChatIn,
+    StudentResumeIn,
+)
 
 router = APIRouter()
 
@@ -237,13 +255,28 @@ def answer_stream(
         submit_answer  提交自己的作答      → grade_submit
         explain        "讲解一下/详细讲讲"  → explain_concept
         off_topic      与本题无关的闲聊     → respond
+
+    ★ homework_id 决定作答落库的"来源"（学生端「我的作业」点进来才有值）：
+        有值 → source_type="homework"、source_id=作业id
+                → 老师端 T-03「作业提交情况」按这两个字段查全班作答，才能查到
+        None → source_type="chat"、source_id=0
+                → 只给 S-10 诊断测验供错题数据，老师端看不到（自由练习本就不属于作业）
+      两处都传：state 里存一份给同 thread 后续复用，config.configurable 里传一份给 resume 兜底
     """
     # 身份校验
     _own_student_or_admin(db, user, body.student_id)
 
     graph = _get_student_graph()
 
-    config = {"configurable": {"thread_id": f"{body.student_id}_{body.question_id}"}}
+    # ★ homework_id 走 config.configurable 而不是只放 state：
+    #   挂起后 resume 走 Command(resume=...) 不带 state 更新，
+    #   只有 config 里这份才是本次请求的新鲜值（学生可能换了作业再回到同一题）
+    config = {
+        "configurable": {
+            "thread_id": f"{body.student_id}_{body.question_id}",
+            "homework_id": body.homework_id,
+        }
+    }
 
     # 防御性 resume：图还挂着，这条输入就是"对上一次提示的回应"，不能用新输入 invoke
     # 因为图都挂了checkpointer，所以先查：当前thread上，有没有interrupt挂起
@@ -258,6 +291,7 @@ def answer_stream(
             graph,
             {"student_id": body.student_id, 
              "question_id": body.question_id,
+             "homework_id": body.homework_id,   # 作业上下文：判分落库定来源（homework/chat）
              "messages": [{"role": "user", "content": body.message}]
             },
             config,
@@ -273,15 +307,24 @@ def resume(body: StudentResumeIn, user: CurrentUser = Depends(get_current_user),
            db: Session = Depends(get_db)):
     """恢复被 interrupt 挂起的会话：message 包进 Command(resume=...)。
 
-    得到的数据：student_id + question_id 定位 thread；message 是学生的回应
+    得到的数据：student_id + question_id 定位 thread；message 是学生的回应；
+                homework_id 是作业上下文（自由练习不传）
     要做的操作：守卫 → Command(resume) invoke → SSE 帧
+                homework_id 走 config.configurable：resume 不带 state 更新，
+                只靠 state 里那份可能是旧的（学生可能先在自由练习答过同一题）
     图没挂起时调用会怎样：LangGraph 对"无挂起却 resume"直接报错，
         在生成器里被 try/except 接住 → 前端收到 type=error，提示刷新重试。
     """
     _own_student_or_admin(db, user, body.student_id)
 
     graph = _get_student_graph()
-    config = {"configurable": {"thread_id": f"{body.student_id}_{body.question_id}"}}
+    # homework_id 同样走 config：resume 不带 state 更新，只有这里能覆盖旧值
+    config = {
+        "configurable": {
+            "thread_id": f"{body.student_id}_{body.question_id}",
+            "homework_id": body.homework_id,
+        }
+    }
     gen = _stream_graph_events(graph, Command(resume=body.message), config)
     return StreamingResponse(gen, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache"})
@@ -334,6 +377,66 @@ def homework_questions(homework_id: int, user: CurrentUser = Depends(get_current
             "questions": _questions_without_answers(list(rows))}
 
 
+@router.get("/homework/{homework_id}/progress")
+def homework_progress(homework_id: int, user: CurrentUser = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """当前学生在这份作业上的完成进度（逐题状态 + 已答/总题数）。
+
+    得到的数据：
+        homework_id（作业 id）；
+        学生档案由当前登录账号解析（self 通道，不看 query 参数）。
+
+    要做的操作：
+        1. 校验作业存在、且属于自己班级（admin 放行）
+        2. 数这份作业共几题（homework_questions）
+        3. 查自己在这些题上的作答（source_type='homework', source_id=作业id）
+        4. 按题目 id 拼成逐题状态
+
+    返回：
+        {"homework_id": 6, "total": 10, "answered": 7, "correct": 5,
+         "items": [{"question_id": 7, "is_correct": true, "score": 10.0}, ...]}
+
+    为什么单开一个接口：
+        学生端要在左侧题号旁边标 ✓/✗、顶部显示"已完成 7/10"，
+        而 homework/{id}/questions 是脱敏题目列表、不含作答状态；
+        完成度又必须从库里读真值——前端自己在内存里记会因刷新页面全部丢失。
+    """
+    profile = db.execute(select(Student).where(Student.user_id == user.id)).scalar_one_or_none()
+    if profile is None and "admin" not in user.roles:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="当前账号没有学生档案")
+
+    hw = db.get(Homework, homework_id)
+    if hw is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="作业不存在")
+    if "admin" not in user.roles and hw.class_id != profile.class_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="forbidden: 该作业不属于你的班级")
+
+    total = db.execute(
+        select(func.count()).select_from(HomeworkQuestion)
+        .where(HomeworkQuestion.homework_id == homework_id)
+    ).scalar_one()
+
+    rows = db.execute(
+        select(StudentAnswer.question_id, StudentAnswer.is_correct, StudentAnswer.score)
+        .where(StudentAnswer.student_id == profile.id)
+        .where(StudentAnswer.source_type == "homework")
+        .where(StudentAnswer.source_id == homework_id)
+    ).all()
+
+    items = [
+        {"question_id": qid, "is_correct": bool(ok) if ok is not None else None, "score": score}
+        for qid, ok, score in rows
+    ]
+
+    return {
+        "homework_id": homework_id,
+        "total": total,
+        "answered": len(items),
+        "correct": sum(1 for it in items if it["is_correct"] is True),
+        "items": items,
+    }
+
+
 @router.get("/mastery/{student_id}")
 def mastery(student_id: int, granularity: str = "kp",
             user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -380,6 +483,7 @@ def quiz_generate(user: CurrentUser = Depends(get_current_user), db: Session = D
     返回：quiz_id + target_points（可解释性留痕）+ 题目列表（脱敏无答案）
     """
     profile = db.execute(select(Student).where(Student.user_id == user.id)).scalar_one_or_none()
+
     if profile is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="当前账号没有学生档案")
 
@@ -387,6 +491,7 @@ def quiz_generate(user: CurrentUser = Depends(get_current_user), db: Session = D
         {"student_id": profile.id, "days": days, "total": total},
         config={"configurable": {"thread_id": f"quiz_{profile.id}"}},
     )
+    
     if result.get("quiz_id") is None:
         return {"quiz_id": None, "generated_reason": result.get("generated_reason", ""),
                 "target_points": result.get("target_points", []), "questions": []}
@@ -480,3 +585,317 @@ def quiz_submit(quiz_id: int, body: QuizSubmitIn,
 
     return {"quiz_id": quiz.id, "results": results,
             "confirmed_n": confirmed_n, "pending_n": pending_n}
+
+
+# =====================================================================
+# M7 考试模块：取卷 / 交卷 / 手写图上传
+# =====================================================================
+UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "data" / "uploads"
+
+# 只收这三种：手机拍照是 jpeg，截图是 png，苹果新机型可能是 webp
+ALLOWED_IMAGE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+MAX_IMAGE_BYTES = 6 * 1024 * 1024     # 6MB：1280px JPEG 约 200~400KB，留足余量
+
+
+def _self_profile(db: Session, user: CurrentUser) -> Student:
+    """当前登录账号的学生档案（self 通道唯一入口）。
+
+    得到的数据：user（JWT 解析结果，含 roles）
+
+    要做的操作：students 表按 user_id 查一行
+
+    返回：Student 行
+
+    不满足会怎样：403。没有学生档案的账号（纯老师/教研）调学生端接口一律拦下，
+    否则 profile 为 None 会在后面拼出莫名其妙的 AttributeError。
+    """
+    profile = db.execute(
+        select(Student).where(Student.user_id == user.id)
+    ).scalar_one_or_none()
+    if profile is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="当前账号没有学生档案")
+    return profile
+
+
+@router.get("/exams")
+def my_exams(user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """我这一届的考试列表：被推送的卷 + 我的考试记录。
+
+    得到的数据：当前登录账号 → 学生档案 → class_id
+
+    要做的操作：
+        t1 exam_paper_classes 按 class_id 过滤出"我们班被推的卷"
+        t2 每卷拼上我的 exam_attempts（没交过就是 null）
+        t3 数一下还有几道主观题等老师批
+
+    返回：
+        [{"paper_id": 3, "title": "初二数学月考卷", "question_count": 20,
+          "full_score": 100.0, "pending_subjective": 0,
+          "attempt": {"status": "graded", "total_score": 86.0, ...}}]
+
+    为什么 attempt 为空也要返回：
+        学生端要分两个区——「待考试」和「考试记录」。
+        待考的卷 attempt=null，记录区的卷 attempt 有值，一个接口够用。
+    """
+    from app.services.exam_delivery import student_papers
+
+    profile = _self_profile(db, user)
+    return student_papers(db, profile)
+
+
+@router.get("/exams/{paper_id}")
+def exam_paper_detail(paper_id: int, user: CurrentUser = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """取一份卷的作答界面数据：题目（脱敏）+ 我已填的答案。
+
+    得到的数据：paper_id
+
+    要做的操作：
+        t1 学生档案 + 卷子存在性
+        t2 越权守卫：这份卷必须推给了我的班（exam_paper_classes），否则 403
+        t3 卷面题目按 seq 顺序出（选择→填空→解答），不带标准答案与解析
+
+    返回：见 exam_delivery.exam_detail 的 docstring
+
+    为什么不能复用 /homework/{id}/questions：
+        那份接口按 homework_questions 查题、也不带每题分值与"我的作答"，
+        而考试界面必须显示"这题 8 分"和上次填了什么（刷新页面不丢草稿）。
+    """
+    from app.services.exam_delivery import exam_detail, student_can_take
+
+    profile = _self_profile(db, user)
+    paper = db.get(ExamPaper, paper_id)
+    if paper is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"试卷 {paper_id} 不存在")
+
+    if not student_can_take(db, paper, profile):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            detail="forbidden: 这份试卷没有推送到你的班级")
+
+    return exam_detail(db, paper, profile)
+
+
+@router.post("/exams/{paper_id}/submit")
+def exam_submit(paper_id: int, body: ExamSubmitIn,
+                user: CurrentUser = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    """交卷：逐题落库 → 客观题立刻判分 → 建考试记录。
+
+    得到的数据：paper_id + body.answers（逐题 content 与手写图地址）
+
+    要做的操作：
+      t1 守卫：自己 + 卷子存在 + 卷子推给了自己的班 + 没交过（重复提交 409）
+      t2 save_exam_answers：一个事务写 student_answers（source_type='exam'），
+         漏答的客观题补空作答（漏答≠未判分，必须判 0 分）
+      t3 客观题逐题跑批改图 → 规则直判 → 写 grading_records + BKT + 错题本
+      t4 主观题不跑图：只留 is_correct=NULL，等老师在待批改里按题批
+      t5 建 exam_attempts：客观题得分先落，主观题批完由老师端点回写
+      t6 返回逐题结果，前端据此在考试记录里显示对错
+
+    返回：
+        {"paper_id": 3, "objective_score": 42.5, "full_score": 100.0,
+         "pending_subjective": 3,
+         "attempt": {"id": 12, "status": "submitted", ...},
+         "results": [{"question_id": 7, "is_correct": true, "score": 2.5}, ...]}
+
+    为什么客观题不用前端算：
+        答案在服务端，前端拿不到（脱敏），只能后端判。
+        也没走"前端提交答案 → 后端比对"的轻量路子，为的是复用批改图里
+        已经写好的一套：写 grading_records、更新 BKT、答错落错题本。
+    """
+    from app.services.exam_delivery import (
+        create_attempt,
+        paper_total_score,
+        save_exam_answers,
+        student_can_take,
+    )
+
+    profile = _self_profile(db, user)
+    paper = db.get(ExamPaper, paper_id)
+    if paper is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"试卷 {paper_id} 不存在")
+    if not student_can_take(db, paper, profile):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            detail="forbidden: 这份试卷没有推送到你的班级")
+
+    from app.models import ExamAttempt
+
+    dup = db.execute(
+        select(ExamAttempt.id)
+        .where(ExamAttempt.paper_id == paper.id)
+        .where(ExamAttempt.student_id == profile.id)
+    ).scalar_one_or_none()
+    if dup is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="这份试卷你已经交过了")
+
+    # ---- t2 落作答 ----
+    try:
+        answer_ids = save_exam_answers(db, paper, profile, body.answers)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    if not answer_ids:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="作答与卷面题目对不上，请重新打开试卷")
+
+    # ---- t3 客观题判分（主观题跳过：留给老师）----
+    # 数据源用"卷面全部题目"，不是 answer_ids —— 学生漏答的客观题也必须判 0，
+    # 否则它会以 is_correct=NULL 躺在库里，学生页显示"待老师批改"、
+    # 老师待批改队列里混进一堆选择题（用户实际踩到过）。
+    paper_rows = db.execute(
+        select(Question.id, Question.question_type)
+        .join(ExamPaperQuestion, ExamPaperQuestion.question_id == Question.id)
+        .where(ExamPaperQuestion.paper_id == paper.id)
+        .order_by(ExamPaperQuestion.seq)
+    ).all()
+
+    graph = _get_grading_graph()
+    results: list[dict] = []
+    objective_score = 0.0
+    missed = 0
+    for qid, qtype in paper_rows:
+        if qtype == "subjective":
+            continue
+
+        aid = answer_ids.get(qid)
+        if aid is None:
+            # 兜底补行理论上不会走：save_exam_answers 会把漏答的客观题补一行空作答。
+            # 真走到这里说明那一步出了岔子，跳过但记账，最后由 exam_detail 自愈。
+            missed += 1
+            continue
+
+        cfg = {"configurable": {"thread_id": f"grading_{aid}"}}
+        out = graph.invoke({"answer_id": aid, "teacher_user_id": user.id}, cfg)
+        score = float(out.get("final_score") or 0)
+        objective_score += score
+        results.append({
+            "question_id": qid, "answer_id": aid,
+            "status": out.get("status", "confirmed"),
+            "is_correct": out.get("is_correct"), "score": score,
+        })
+
+    # 待批 = 卷面主观题里"学生真的答了"的那几道（没作答的不该进老师队列）
+    pending_subjective = sum(
+        1 for qid, qtype in paper_rows if qtype == "subjective" and qid in answer_ids
+    )
+
+    # ---- t5 建考试记录 ----
+    full_score = float(db.execute(
+        select(func.coalesce(func.sum(ExamPaperQuestion.score), 0))
+        .where(ExamPaperQuestion.paper_id == paper.id)
+    ).scalar_one()) or paper_total_score(paper)
+
+    try:
+        attempt = create_attempt(db, paper, profile, objective_score, full_score,
+                                 pending_subjective)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "paper_id": paper.id,
+        "objective_score": round(objective_score, 1),
+        "full_score": round(full_score, 1),
+        "pending_subjective": pending_subjective,
+        "attempt": {
+            "id": attempt.id, "status": attempt.status,
+            "objective_score": attempt.objective_score,
+            "subjective_score": attempt.subjective_score,
+            "total_score": attempt.total_score,
+            "full_score": attempt.full_score,
+        },
+        "results": results,
+    }
+
+
+@router.post("/upload/answer-image")
+def upload_answer_image(body: ImageUploadIn,
+                        user: CurrentUser = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """手写解题步骤拍图上传（base64 → 落盘 → 返回可访问 URL）。
+
+    得到的数据：{"filename": "IMG_001.jpg", "data": "data:image/jpeg;base64,/9j/...",
+                "purpose": "answer"}
+
+    要做的操作：
+        t1 拆 data URL 取 mime → 只认 jpeg/png/webp（别的当 415 拒掉）
+        t2 base64 解码 → 体积 > 6MB 直接 413
+        t3 文件名用 uuid4（绝不沿用客户端文件名：那张图可能是 ../../etc/passwd）
+        t4 落到 data/uploads/{purpose}/{YYYYMM}/{uuid}.jpg
+        t5 返回 /uploads/... 相对路径，前端拼 API_BASE 显示
+
+    返回：{"url": "/uploads/answer/202610/ab12cd34.jpg", "bytes": 263145}
+
+    为什么存文件不存库：
+        手写图动辄几百 KB，塞进 student_answers 会让整张表扫一次就爆内存；
+        关键是它还会进 checkpoint 快照（批改图的 state 带 student_answer 文本），
+        二进制进状态带来的是"每个 checkpoint 都背着图"。
+
+    为什么第一行先要学生档案：
+        上传口不涉及他人数据，但也不该让任何登录账号往磁盘里塞文件。
+        没有学生档案的账号（纯老师/教研）→ 403，最小权限。
+    """
+    _self_profile(db, user)
+
+    raw = body.data.strip()
+    mime = "image/jpeg"
+    payload = raw
+
+    if raw.startswith("data:"):
+        head, _, payload = raw.partition(",")
+        mime = head[5:].split(";")[0].strip().lower() or mime
+
+    if mime not in ALLOWED_IMAGE:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                            detail=f"不支持的图片类型 {mime}，请用 JPG/PNG/WEBP")
+
+    try:
+        blob = base64.b64decode(payload, validate=False)
+    except Exception:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="图片数据不是合法 base64")
+
+    if not blob:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="图片是空的")
+    if len(blob) > MAX_IMAGE_BYTES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=f"图片超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB，请压缩后再传")
+
+    # 用途白名单：不接受任意目录名（防目录穿越）
+    purpose = body.purpose if body.purpose in {"answer"} else "answer"
+    url = _persist_upload(blob, purpose, ALLOWED_IMAGE[mime])
+    return {"url": url, "bytes": len(blob)}
+
+
+def _persist_upload(blob: bytes, purpose: str, suffix: str = ".jpg") -> str:
+    """把图片字节写到 data/uploads/{purpose}/{YYYYMM}/，返回可访问的相对 URL。
+
+    得到的数据：blob（已解码的图片字节）、purpose（白名单内的子目录名）、
+                suffix（".jpg"/".png"/".webp"，由调用方按 mime 决定）
+
+    要做的操作：
+        t1 年月分桶（一个月一个目录，避免单目录堆几十万文件）
+        t2 文件名用 uuid4 —— 绝不沿用客户端文件名（那张图的名字可能是 ../../etc/passwd）
+        t3 按 suffix 落盘
+
+    返回："/uploads/answer/202610/ab12cd34ef.jpg"
+
+    为什么单独抽一个函数：
+        落盘是唯一有副作用的一步。抽出来之后，越权矩阵可以把这一步换成假实现，
+        "上传口鉴权对不对"和"文件写哪去了"两件事就能分开测。
+    """
+    from datetime import datetime
+
+    bucket = datetime.now().strftime("%Y%m")
+    target_dir = UPLOAD_ROOT / purpose / bucket
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{uuid.uuid4().hex}{suffix}"
+    (target_dir / filename).write_bytes(blob)
+
+    return f"/uploads/{purpose}/{bucket}/{filename}"

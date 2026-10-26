@@ -14,6 +14,7 @@
 import re
 
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -28,6 +29,7 @@ from app.graphs.student.state import StudentAgentState
 from app.models import Question
 from app.rag.retriever import format_context, retrieve
 from app.services.grading import grade_objective   # M3-T1 判分服务（纯规则，与老师批改图同源）
+from app.services.wrong_record import record_answer, record_answer_full_score
 from pymilvus import MilvusClient
 
 # 意图四分类（开发计划 M2-T1）
@@ -127,11 +129,23 @@ def _fallback_intent(text: str) -> str:
 def classify_intent(state: StudentAgentState) -> dict:
     """意图分类节点：LLM 结构化输出，异常时关键词兜底。
 
-    得到的数据：state["messages"] 最后一条 HumanMessage（学生刚说的话）
+    得到的数据：
+        state["messages"] 最后一条 HumanMessage（学生刚说的话）；
+        state["question_id"]（拼进 prompt 当上下文）
 
-    要做的操作：拼带题目上下文的 system prompt → invoke_structured 强格式
+    要做的操作：
+        拼带题目上下文的 system prompt → invoke_structured 强格式
+        → 结果不在 INTENTS 里就走关键词兜底
 
-    返回：{"intent": "ask_answer"} 这类单字段增量（LangGraph 只合并返回的键）
+    返回：
+        {"intent": "ask_answer", "is_correct": None, "force_explain": False}
+
+    为什么顺手返回 is_correct / force_explain：
+        这两个都是"上一轮的一次性结果"，不是长期状态。
+        is_correct 不清：学生上一轮答错、这一轮只闲聊，respond 仍读到 False，
+                        回一句"还没对，别急"——学生问"你是哪里人"却被告知答案没对。
+        force_explain 不清：引导满 3 轮后学生再问别的，讲解节点还会塞完整答案。
+        attempt_count 不能清：那是整题累计的引导轮数，清了永远满不了 3 轮。
     """
     question = _fetch_question(state["question_id"])    # 取的是题目行 数据
     q_text = question.content if question else "（题目加载失败）"   # 从题目行数据中 取出content = 题目
@@ -186,7 +200,12 @@ def classify_intent(state: StudentAgentState) -> dict:
         #   退化到 52.9% 的关键词匹配也比直接报错强。
         intent = _fallback_intent(student_text)
 
-    return {"intent": intent}
+    # ★ 顺手清掉上一轮的两个"一次性"标记：
+    #   is_correct    —— 不刷新的话，学生上一轮答错、这一轮只闲聊，
+    #                    respond 仍会读到 False，回一句"还没对，别急"（截图里的 bug）
+    #   force_explain —— 不刷新的话，引导满 3 轮后学生再问别的，讲解节点还会给完整答案
+    # 注意 attempt_count 不能清：那是整题累计的引导轮数，清了就永远满不了 3 轮
+    return {"intent": intent, "is_correct": None, "force_explain": False}
 
 
 # =====================================================================
@@ -343,29 +362,62 @@ def explain_concept(state: StudentAgentState) -> dict:
 # =====================================================================
 # 判分节点（M3-T1 判分服务接入版：分题型调不同批改方法）
 # =====================================================================
-def grade_submit(state: StudentAgentState) -> dict:
+def grade_submit(state: StudentAgentState, config: RunnableConfig | None = None) -> dict:
     """提交回答 → 按题型分发批改（客观题规则判分 / 主观题待老师批改）。
 
-    得到的数据：学生最后一条消息（当作答案）、题目行
+    得到的数据：
+        state["messages"] 末条 HumanMessage（学生提交的答案）；
+        state["question_id"]（题目主键）；
+        state["student_id"]（学生档案 id）；
+        state["attempt_count"]（已引导轮数，首轮可能缺失 → 按 0 处理）
 
-    要做的操作：按 question_type 分流：
-        客观题（choice/fill）→ grade_objective 三层规则判分
-        （归一化 → sympy 表达式等价 → 分题型比对，M3-T1 服务，与老师批改图同源）
+    要做的操作：
+        1. 按 question_type 分流：
+           客观题（choice/fill）→ grade_objective 四层规则判分
+             （归一化 → 等价变体 → 表达式等价 → 多值比对，与老师批改图同源）；
+           主观题（subjective）→ 对话场景没有老师在场，规则判不了，
+             直接回"已提交，等老师批改"（AIMessage 终稿，respond 空过）
 
-        主观题（subjective）→ 对话场景没有老师在场，规则判不了：
-        直接回"已提交，等老师批改"（AIMessage 终稿，respond 空过），
-        完整链路（LLM 建议 → interrupt → 老师确认 → BKT）在老师批改图那边
+        2. ★ 客观题判错时落错题（student_answers + error_logs + BKT）：
+           同一道题只记一次，引导后再错不重复记，避免诊断测验的错题频次虚高
 
     返回：
-        客观题 {"current_answer": ..., "is_correct": True/False}
-        主观题 {"current_answer": ..., "is_correct": None, "messages": [AIMessage(...)]}
+        客观题 {"current_answer": "x=2或x=3", "is_correct": False}；
+        主观题 {"current_answer": "...", "is_correct": None, "messages": [AIMessage(...)]}
 
+    为什么：
+        S-10 诊断测验的错题取数是 error_logs JOIN student_answers JOIN questions，
+        而聊天链路原来一张表都不写 —— 学生在学习助手里做错多少题都不进库，
+        诊断测验永远"没有错题记录"。落库是这条链唯一缺的那一环。
     """
     question = _fetch_question(state["question_id"])
     student_answer = _last_human_text(state)
 
+    # 作业上下文：学生从「我的作业」点进来才有；自由练习是 None
+    # 两处都读，config 优先：挂起后 resume 走 Command(resume=...) 不带 state 更新，
+    # 此时只有 config.configurable 里这份是新鲜的；首次 invoke 则两者一致
+    homework_id = (config or {}).get("configurable", {}).get("homework_id")
+    if homework_id is None:
+        homework_id = state.get("homework_id")
+
     # ---- 主观题：对话场景不判分，回执式回复（等老师批改）----
     if question.question_type == "subjective":
+        # 落库但不判分（is_correct=None）：老师端「作业提交情况」要看到"这题学生交了、待批改"，
+        # 否则主观题作业在老师端永远显示为"没交"
+        try:
+            record_answer(
+                student_id=state["student_id"],
+                question=question,
+                student_answer=student_answer,
+                is_correct=None,
+                score=None,
+                homework_id=homework_id,
+                attempt_count=state.get("attempt_count", 0) or 0,
+            )
+
+        except Exception as exc:
+            print(f"[grade_submit] ⚠ 主观题作答落库失败（不影响回执）: {exc}")
+
         return {
             "current_answer": student_answer,
             "is_correct": None,      # 三态保留 NULL：没判分，不是"判错"
@@ -377,26 +429,94 @@ def grade_submit(state: StudentAgentState) -> dict:
 
 
     # ---- 客观题（choice/fill）：调 M3-T1 判分服务 ----
+    # 满分取真值：作业题每题 10 分就读 homework_questions.score，
+    # 自由练习没有作业语境才按百分制 —— 否则老师端"得分"列会显示 100 而作业配置是 10
+    full_score = record_answer_full_score(homework_id, question.id)
+
     result = grade_objective(
         question_type=question.question_type,
         student_answer=student_answer,
         standard_answer=question.answer,
-        full_score=100.0,   # 对话场景无作业分值语境，按百分制给满分/0；
-                            # 作业/测验链路走批改图 fetch_answer，那里取 homework_questions.score 真分值
+        full_score=full_score,
     )
+
+    # ---- 判完就落库（对错都落）----
+    # 两个消费方同时依赖这张表：
+    #   ① 老师端 T-03「作业提交情况」按 (source_type='homework', source_id=作业id) 查全班作答
+    #   ② S-10 诊断测验按 error_logs JOIN student_answers WHERE is_correct=false 取错题
+    # 之前只在答错时记 chat 来源，所以老师端永远"暂无作答记录"
+    try:
+        record_answer(
+            student_id=state["student_id"],
+            question=question,
+            student_answer=student_answer,
+            is_correct=result["is_correct"],
+            score=result["score"],
+            homework_id=homework_id,
+            attempt_count=state.get("attempt_count", 0) or 0,
+        )
+
+    except Exception as exc:
+        print(f"[grade_submit] ⚠ 作答落库失败（不影响判分反馈）: {exc}")
+
     return {"current_answer": student_answer, "is_correct": result["is_correct"]}
 
 
 # =====================================================================
 # 出口节点
 # =====================================================================
+def _small_talk_reply(state: StudentAgentState) -> str:
+    """学生跑题时的一句话回应：接住话头 + 引回当前题目。
+
+    得到的数据：
+        state["messages"] 末条 HumanMessage（学生这句闲聊，类似 "你是哪里人"）；
+        state["question_id"]（当前题目，用来把话题拉回来）
+
+    要做的操作：
+        调 LLM 生成不超过 2 句的回应；异常时用固定文案兜底
+
+    返回：
+        回复正文（已过 clean_llm_text，公式/标点收口过）
+
+    为什么不用固定模板：
+        "你是哪里人" 回一句"咱们回到题目"太机械，学生会觉得对面是个假人；
+        但也不能让它自由发挥——prompt 里把字数、敏感话题、身份暴露都限死了。
+    """
+    question = _fetch_question(state["question_id"])
+    stem = (question.content or "")[:200] if question else ""
+
+    try:
+        reply = get_llm(temperature=0.6).invoke([
+            ("system",
+             "你是初中数学学习助手，正在陪学生做当前这道题。"
+             "学生这句话和题目无关（闲聊或跑题）。要求：\n"
+             "1. 先用一句自然、口语化的话接住他，不要机械，不要自称语言模型；\n"
+             "2. 再用一句话把话题引回这道题；\n"
+             "3. 全程不超过 60 字，不要列表、不要标题、不要输出 LaTeX 记号；\n"
+             "4. 政治、宗教、暴力、成人、医疗建议等话题礼貌拒绝，只谈学习。\n\n"
+             + OUTPUT_FORMAT_RULES),
+            ("human", f"当前题目：{stem}\n学生说：{_last_human_text(state)}"),
+        ])
+        return clean_llm_text(reply.content)
+
+    except Exception:
+        # 闲聊不是主链路，LLM 挂了也要给个回复，别把整轮对话卡死
+        return "我在的。不过咱们先把这道题往前推一步——说说你想到哪了，或者要一句提示？"
+
+
 def respond(state: StudentAgentState) -> dict:
     """统一出口节点：按当前状态拼最终回复。
 
     已有 AIMessage（讲解/完整讲解节点自己产出了回复）→ 不再追加，避免双条。
     被安全过滤拦截 → 兜底警告，不调 LLM（恶意内容不配消耗 token）。
+    闲聊跑题 → 一句自然回应 + 引回题目（不能让 AI 装死，也不能陪着跑偏）。
     判分对 → 肯定 + 收尾；
     判分错 → 鼓励并指向"要讲解"路径。
+
+    ★ 顺序有讲究：off_topic 必须排在 is_correct 判断前面。
+      因为 is_correct 描述的是"这道题上一次判得对不对"，
+      而学生这句话可能只是闲聊，两件事没关系——
+      排在后面就会出现"学生问'你是哪里人'，AI 回'还没对，别急'"。
     """
     # 讲解类节点（有增量消息的节点）已经写了最终回复，response节点无增量消息，直接返回{}通过
     if state["messages"] and isinstance(state["messages"][-1], AIMessage):
@@ -406,6 +526,11 @@ def respond(state: StudentAgentState) -> dict:
         return {"messages": [AIMessage(
             content="这条消息我不能处理。我们是学习助手，咱们聊点和题目相关的吧。")]}
 
+    # ---- 先判断是否属于闲聊/跑题：先顺着接一句，再自然拉回题目 ----
+    if state.get("intent") == "off_topic":
+        return {"messages": [AIMessage(content=_small_talk_reply(state))]}
+
+    # 再用判断作答是否正确
     if state.get("is_correct") is True:
         question = _fetch_question(state["question_id"])
         return {"messages": [AIMessage(
@@ -417,6 +542,7 @@ def respond(state: StudentAgentState) -> dict:
         return {"messages": [AIMessage(
             content="还没对，别急。可以说「讲解一下」让我带你梳理思路，"
                     "或者把你的计算过程发我，我帮你找问题出在哪一步。")]}
+
 
     return {"messages": [AIMessage(
         content="咱们回到这道题上：可以把你的想法/算到哪一步发给我，"

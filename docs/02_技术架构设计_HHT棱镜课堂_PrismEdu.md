@@ -30,7 +30,7 @@
 | 短期记忆（checkpointer） | **PostgresSaver**               | langgraph-checkpoint-postgres | 多轮引导与 interrupt 挂起状态**跨进程持久**（重启不丢），与业务表同库，零额外运维（详见 4.3）              |
 | 长期记忆（可选）       | **InMemoryStore**               | langgraph 内置                 | 学生画像跨 thread 共享，由 PostgreSQL 兜底预热（详见 4.4，D3 尾巴可选；升级路径 PostgresStore 一行）           |
 | 数据处理       | **Pandas + NumPy**              | pandas / numpy            | 试卷分析统计计算                                                                       |
-| 前端         | **Streamlit**                   | streamlit + plotly        | 三页布局，一天出效果，雷达图用 plotly                                                         |
+| 前端         | **原生 ES Modules（`web_app/`）** | 零构建、零 npm；自写 `serve.py` 静态服务 | 四端 SPA + Hash 路由 + 毛玻璃视觉；**不占 Python 依赖**（`streamlit` / `plotly` 已随 M5-T4 演示端于 2026-10-26 一并移除） |
 | 包管理        | **uv**                          | uv                        | 依赖安装与环境隔离                                                                      |
 
 ---
@@ -39,7 +39,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  接入层  Streamlit 三端页面（学生 / 老师 / 教研）            │
+│  接入层  web_app（原生 ES Modules，四端：学生 / 老师 / 教研 / 管理）│
 │           + FastAPI OpenAPI 文档（调试用）                  │
 └───────────────────────────┬──────────────────────────────┘
                             │ HTTP REST + SSE
@@ -798,7 +798,11 @@ Milvus similarity_search(k=5, expr='role_visible != "teacher_only"')   # expr �
 | **POST** | **`/api/research/exam/generate`**          | **R-08 生成试卷**，body 含 \`exam_type=monthly  | midterm                                | final`、`total_score`、`grade_id\` | 返回 paper_id + QuotaPlan + 题目清单 + 审核报告 |
 | **GET**  | **`/api/research/exam/{paper_id}/quota`**  | 取配额表                                      | 教研组长可人工改后再触发重抽                         |                                  |                                       |
 | **POST** | **`/api/research/exam/{paper_id}/assign`** | 试卷定稿并布置到目标班级                              | 定稿后 student_answers 的 source_type=exam |                                  |                                       |
-| **GET**  | **`/api/research/questions/abnormal`**     | 历史异常题清单（P/D 越界）                           | R-04 产出、R-08 消费的接口                     |                                  |                                       |
+
+> **异常题不单独开清单接口**（2026-10-26 下线 `GET /api/research/questions/abnormal`）：
+> R-04 返回的 `report.abnormal_items` 已带题号 / P / D / 成因，信息更全；
+> `questions.quality_flag='abnormal'` 只作为 R-08 抽题时的沉底降权依据，不对外暴露列表。
+> 写回（`write_back_quality_flags`）与降权（`selection_engine` 排序）链路保持不变。
 
 ### 8.4 认证与双通道 scope（v1.5 新增）
 
@@ -923,14 +927,13 @@ HHT-PrismEdu_project/
 │       ├── test_quiz_generation.py    # S-10 题目全落在候选知识点上
 │       ├── test_scope_isolation.py    # ★ 双通道 scope：researcher 调学生明细必须 403；多角色并集正确
 │       └── test_admin_import.py       # ★ CSV 导入：坏行不写库、报告行号正确
-├── frontend/
-│   └── streamlit_app/
-│       ├── app.py                     # 入口 + 角色切换
-│       └── pages/
-│           ├── 1_学生端.py
-│           ├── 2_老师端.py
-│           ├── 3_教研端.py
-│           └── 4_管理后台.py           # ★ A-01：CSV 导入 + 用户/授课关系/任命/班级/日志（6 项，见 PRD 2.2）
+├── web_app/                           # 前端（原生 ES Modules，无构建）
+│   ├── index.html
+│   ├── serve.py                       # 静态服务（no-store，改完刷新即生效）
+│   ├── assets/apple.css               # 视觉体系（Apple 风）
+│   └── src/
+│       ├── app.js  core.js  shell.js  charts.js  kp-names.js
+│       └── views/                     # login / student / teacher / research / admin
 ├── data/
 │   ├── raw/                           # 教材 PDF、题库原始文件
 │   └── knowledge_graph/               # 图谱 seed JSON
@@ -988,9 +991,8 @@ dependencies = [
     "python-jose[cryptography]", # JWT
     "passlib[bcrypt]",
     "python-dotenv>=1.0",
-    # 前端可视化
-    "streamlit>=1.38",
-    "plotly>=5.24",
+    # 前端：web_app/ 是原生 ES Modules，不占 Python 依赖
+    #（原 "streamlit>=1.38" / "plotly>=5.24" 已于 2026-10-26 随演示端删除）
 ]
 
 [tool.uv]

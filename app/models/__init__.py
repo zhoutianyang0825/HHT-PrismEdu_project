@@ -1,20 +1,27 @@
-"""模型统一出口：import 一次拿到全部 20 张表，Alembic env.py 只需 import 本文件。
+"""模型统一出口：import 一次拿到全部表，Alembic env.py 只需 import 本文件。
 
- 清点（20 张）：
+ 清点（23 张）：
   user.py     users / user_roles / teachers                          (3)
   org.py      classes / students / teaching_assignments / research_leads (4)
   content.py  chapters / knowledge_points / questions                (3)
   learning.py homeworks / homework_questions / student_answers /
               grading_records / error_logs                           (5)
   mastery.py  bkt_state / mastery_records                            (2)
-  exam.py     diagnostic_quizzes / exam_papers                       (2)
+  exam.py     diagnostic_quizzes / exam_papers / exam_paper_questions /
+              exam_paper_classes / exam_attempts                     (5)
   audit.py    audit_logs                                             (1)
-  合计 20 ✓
+  合计 23 ✓
 """
 from app.db.base import Base
 from app.models.audit import AuditLog
 from app.models.content import Chapter, KnowledgePoint, Question
-from app.models.exam import DiagnosticQuiz, ExamPaper
+from app.models.exam import (
+    DiagnosticQuiz,
+    ExamAttempt,
+    ExamPaper,
+    ExamPaperClass,
+    ExamPaperQuestion,
+)
 from app.models.learning import (
     ErrorLog,
     GradingRecord,
@@ -34,6 +41,6 @@ __all__ = [
     "Chapter", "KnowledgePoint", "Question",
     "Homework", "HomeworkQuestion", "StudentAnswer", "GradingRecord", "ErrorLog",
     "BKTState", "MasteryRecord",
-    "DiagnosticQuiz", "ExamPaper",
+    "DiagnosticQuiz", "ExamPaper", "ExamPaperQuestion", "ExamPaperClass", "ExamAttempt",
     "AuditLog",
 ]

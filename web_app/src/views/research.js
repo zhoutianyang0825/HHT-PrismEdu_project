@@ -3,31 +3,126 @@
  *   年级学情 GET /grade/{grade}/mastery?subject=math
  *   班级对比 GET /mastery/compare?grade=&subject=
  *   智能出卷 POST /exam/generate · GET /exam/{id}/quota · POST /exam/{id}/assign
- *   考后分析 POST /paper/{id}/analyze · GET /questions/abnormal
+ *   考后分析 POST /paper/{id}/analyze（异常题写回 quality_flag，报告里带 abnormal_items）
  *
  * 通道纪律（PRD 2.3）：本端只走 aggregate 聚合通道，接口层面没有学生明细。
  * ========================================================================== */
 import {
-  http, toast, esc, md, mdInline, busy, pct, fixed, emptyState, errorBox,
+  http, toast, esc, md, mdInline, busy, pct, fixed, dateOf, modal, emptyState, errorBox,
 } from "../core.js";
 import { kpName } from "../kp-names.js";
 import { radar, barRows, barChart } from "../charts.js";
 
 const R = {
-  grade: "初三",
+  grade: "",            // 首次渲染由 /my-scope 决定——权限之外的年级不该出现在选项里
   subject: "math",
-  grades: ["初一", "初二", "初三"],
+  grades: [],           // 权限算出来的年级清单（按学段排序），不再写死三连
+  subjects: [],
+  scopeLoaded: false,   // /my-scope 每个会话只拉一次
+  /* 课程显示名映射（后端回捞）：{chapter: {id: 名}, kp: {id: 名}}。
+     配额表的章节列、缺口清单的知识点前缀都靠它翻成人话——
+     不能靠 kp-names.js 的静态表，那套 key 在知识图谱重构后已经过期。 */
+  naming: { chapter: {}, kp: {} },
   mastery: {},
   compare: {},
   exam: null,
+  /* 出卷记录清单：{total, items}。null = 还没拉过（切年级/生成新卷后置空重拉） */
+  examPapers: null,
+  /* 出卷表单草稿：切换年级会重渲染，不记住的话已选的考试类型和总分会被打回默认值 */
+  examDraft: { type: "monthly", score: 100 },
   analysis: null,
-  abnormal: null,
 };
 
 const DIFF = { easy: "易", medium: "中", hard: "难" };
 const QTYPE = { choice: "选择", fill: "填空", subjective: "解答" };
+const SUBJECT_CN = { math: "数学", chinese: "语文", english: "英语" };
+/* 出卷记录里显示的类型名：库里存 monthly/midterm/final，不翻译会直接甩英文给组长 */
+const EXAM_TYPE_CN = { monthly: "月考", midterm: "期中", final: "期末" };
+
+/* 权限范围：教研组长只该看到自己任命过的年级。
+   scopes 里的 aggregate 通道（年级 × 学科）由 research_leads 生成，
+   admin 不受任命限制 → 后端给库里真实存在的全部年级。 */
+async function ensureScope() {
+  if (R.scopeLoaded) return;
+
+  // ① 我能看哪些年级 / 学科。先拿这个，因为下面拉名字映射要用确定下来的 subject
+  const scope = await http.get("/api/research/my-scope");
+  R.grades = scope.grades || [];
+  R.subjects = scope.subjects || ["math"];
+
+  // 学科：当前选择不在权限内就退回第一个
+  if (!R.subjects.includes(R.subject)) R.subject = R.subjects[0] || "math";
+
+  // 年级：优先保留当前选择；不在权限内（或还没选）就取第一个（后端已按初一→初三排好）
+  if (!R.grades.includes(R.grade)) R.grade = R.grades[0] || "";
+
+  // ② 课程 id → 名字（章节/知识点）。配额表章节列、缺口清单都靠它，一个会话拉一次就够
+  const naming = await http.get("/api/research/naming", { subject: R.subject });
+  R.naming = { chapter: naming.chapter || {}, kp: naming.kp || {} };
+
+  R.scopeLoaded = true;
+}
+
+/* 知识点名：后端映射优先，静态表兜底（后端没收录的旧 id 才轮到它） */
+function kpLabel(id) {
+  if (!id) return "—";
+  return R.naming.kp[id] || kpName(id);
+}
+
+/* 章节名：只认库里的名字；查不到说明这个 id 本身是错的，如实标出来而不是裸露 id */
+function chapterLabel(id) {
+  if (!id) return "—";
+  return R.naming.chapter[id] || `未知章节（${id}）`;
+}
+
+/* 缺口文案里的知识点前缀翻中文。
+   新生成的卷子后端已经写成中文名，这里主要救历史数据（gap 里存的还是 kp_xxx）。
+   正则只吃 ASCII id，中文名不会被误伤。 */
+function gapText(gap) {
+  return String(gap).replace(/^([a-z0-9_]+):\s*/, (m, id) => `${R.naming.kp[id] || id}: `);
+}
+
+/* 年级切换器：可见年级由权限决定。
+   只有一个年级时不渲染按钮组——一个选项的"切换器"只会让人以为漏了东西。 */
+function gradeSwitcherHTML() {
+  if (R.grades.length <= 1) {
+    return `<span class="pill pill-blue">负责年级 · ${esc(R.grades[0] || "—")}</span>`;
+  }
+  return `<div class="segmented" id="grade-switch">
+    ${R.grades.map((g) => `<button data-grade="${g}" class="${g === R.grade ? "active" : ""}">${g}</button>`).join("")}
+  </div>`;
+}
+
+function bindGradeSwitch(view, ctx, rerender) {
+  view.querySelectorAll("#grade-switch button").forEach((btn) => {
+    btn.onclick = () => {
+      R.grade = btn.dataset.grade;
+      rerender(view, ctx);
+    };
+  });
+}
+
+/* 没有任何教研任命：不渲染空图表，直接说明原因 */
+function renderNoScope(view) {
+  view.innerHTML = `
+    <div class="page-head">
+      <div class="eyebrow">教研端</div>
+      <h1 class="page-title">还没有教研任命</h1>
+      <p class="page-sub">教研端的数据范围由「年级 × 学科」的任命决定，你现在没有任何任命，所以看不到年级聚合数据。</p>
+    </div>
+    <section class="card card-pad">
+      ${emptyState("请联系管理员任命年级",
+        "管理后台 → 教研任命：给你指定负责的年级和学科，重新登录后这里就会出现对应年级。",
+        "lock")}
+    </section>`;
+}
 
 export async function render(view, ctx) {
+  // 先拿权限内的年级，再决定渲染哪个年级的数据
+  await ensureScope();
+
+  if (!R.grades.length) return renderNoScope(view);
+
   if (ctx.tab === "compare") return renderCompare(view, ctx);
   if (ctx.tab === "exam") return renderExam(view, ctx);
   if (ctx.tab === "analysis") return renderAnalysis(view, ctx);
@@ -54,10 +149,8 @@ async function renderOverview(view, ctx) {
     </div>
 
     <div style="display:flex;gap:12px;align-items:center;margin-bottom:22px;flex-wrap:wrap">
-      <div class="segmented" id="grade-switch">
-        ${R.grades.map((g) => `<button data-grade="${g}" class="${g === R.grade ? "active" : ""}">${g}</button>`).join("")}
-      </div>
-      <span class="pill">数学</span>
+      ${gradeSwitcherHTML()}
+      <span class="pill">${esc(SUBJECT_CN[R.subject] || R.subject)}</span>
       <span class="pill">平均 ${pct(avg)}</span>
       <span class="pill pill-red">${weak.length} 个知识点低于 40%</span>
     </div>
@@ -105,12 +198,7 @@ async function renderOverview(view, ctx) {
       </section>
     </div>`;
 
-  view.querySelectorAll("#grade-switch button").forEach((btn) => {
-    btn.onclick = () => {
-      R.grade = btn.dataset.grade;
-      renderOverview(view, ctx);
-    };
-  });
+  bindGradeSwitch(view, ctx, renderOverview);
 }
 
 /* ---------------------------------------------------------------- 班级对比 */
@@ -130,9 +218,7 @@ async function renderCompare(view, ctx) {
     </div>
 
     <div style="display:flex;gap:12px;align-items:center;margin-bottom:22px;flex-wrap:wrap">
-      <div class="segmented" id="grade-switch">
-        ${R.grades.map((g) => `<button data-grade="${g}" class="${g === R.grade ? "active" : ""}">${g}</button>`).join("")}
-      </div>
+      ${gradeSwitcherHTML()}
       <span class="pill">${items.length} 个班级</span>
       ${items.length ? `<span class="pill pill-blue">最高 ${pct(items[items.length - 1].avg_p_known)}</span>
         <span class="pill pill-orange">最低 ${pct(items[0].avg_p_known)}</span>` : ""}
@@ -169,9 +255,7 @@ async function renderCompare(view, ctx) {
       </div>
     </section>`;
 
-  view.querySelectorAll("#grade-switch button").forEach((btn) => {
-    btn.onclick = () => { R.grade = btn.dataset.grade; renderCompare(view, ctx); };
-  });
+  bindGradeSwitch(view, ctx, renderCompare);
 }
 
 /* ---------------------------------------------------------------- 智能出卷 R-08 */
@@ -183,11 +267,18 @@ async function renderExam(view, ctx) {
   }
   const classes = R.compare[R.grade]?.items || [];
 
+  /* 出卷记录与年级联动：缓存的就是"当前年级的记录"，
+     切年级必须置空重拉，否则会把初三的卷子挂在初二页面下。 */
+  if (!R.examPapers) {
+    R.examPapers = (await http.get("/api/research/exam/papers",
+      { grade: R.grade, subject: R.subject })) || { total: 0, items: [] };
+  }
+
   view.innerHTML = `
     <div class="page-head">
       <div class="eyebrow">智能出卷 · R-08</div>
       <h1 class="page-title">先出策略，再抽题，最后审核</h1>
-      <p class="page-sub">命题规划师只决定「选哪些知识点、各配几道」；抽题是 Python 规则，结果可复现；质量审核用硬指标，不达标降难度重抽，最多 2 轮。</p>
+      <p class="page-sub">命题规划师只决定「选哪些知识点、各配几道」；抽题是固定规则，结果可复现；质量审核用硬指标，不达标降难度重抽，最多 2 轮。</p>
     </div>
 
     <div class="grid grid-2" style="align-items:start">
@@ -198,9 +289,9 @@ async function renderExam(view, ctx) {
         <div class="field" style="margin-top:18px">
           <label>考试类型</label>
           <div class="segmented" id="exam-type">
-            <button data-val="monthly" class="active">月考（巩固）</button>
-            <button data-val="midterm">期中（摸底）</button>
-            <button data-val="final">期末（摸底）</button>
+            ${[["monthly", "月考（巩固）"], ["midterm", "期中（摸底）"], ["final", "期末（摸底）"]]
+              .map(([v, label]) => `<button data-val="${v}" class="${v === R.examDraft.type ? "active" : ""}">${label}</button>`)
+              .join("")}
           </div>
         </div>
 
@@ -210,10 +301,11 @@ async function renderExam(view, ctx) {
             <select class="select" id="exam-grade">
               ${R.grades.map((g) => `<option ${g === R.grade ? "selected" : ""}>${g}</option>`).join("")}
             </select>
+            ${R.grades.length <= 1 ? `<div class="hint">只列出你任命负责的年级</div>` : ""}
           </div>
           <div class="field">
             <label for="exam-score">卷面总分</label>
-            <input class="input" id="exam-score" type="number" min="10" max="150" value="100" />
+            <input class="input" id="exam-score" type="number" min="10" max="150" value="${R.examDraft.score}" />
           </div>
         </div>
 
@@ -225,7 +317,7 @@ async function renderExam(view, ctx) {
 
       <section class="card card-pad">
         <div class="card-title">当前达成度</div>
-        <div class="card-sub">审核指标由 Python 计算，LLM 只负责解释</div>
+        <div class="card-sub">审核指标由固定算法计算，LLM 只负责解释</div>
         <div class="list" style="margin-top:10px">
           <div class="list-row"><div class="grow"><div class="title">月考：错题命中率 ≥ 70%</div>
             <div class="meta">知识点来自年级错题 Top10 及其前置</div></div></div>
@@ -237,29 +329,42 @@ async function renderExam(view, ctx) {
       </section>
     </div>
 
-    <div id="exam-result" style="margin-top:20px">${plan ? examResultHTML(plan, classes) : ""}</div>`;
+    <div id="exam-result" style="margin-top:20px">${plan ? examResultHTML(plan, classes) : ""}</div>
 
-  let type = "monthly";
+    ${examPapersHTML(R.examPapers)}`;
+
+  let type = R.examDraft.type;
   view.querySelectorAll("#exam-type button").forEach((btn) => {
     btn.onclick = () => {
       type = btn.dataset.val;
+      R.examDraft.type = type;
       view.querySelectorAll("#exam-type button").forEach((b) => b.classList.toggle("active", b === btn));
     };
   });
 
+  // 切年级：班级列表、年级聚合都跟着换。不重渲染的话下面"布置班级"还是旧年级的班，
+  // 选初中一的卷子会被布置到初二的班上去。
+  view.querySelector("#exam-grade").onchange = (e) => {
+    R.examDraft.score = Number(view.querySelector("#exam-score").value) || 100;
+    R.grade = e.target.value;
+    R.examPapers = null;          // 记录清单跟着年级走，不置空会显示上一个年级的卷子
+    renderExam(view, ctx);
+  };
+
   view.querySelector("#exam-generate").onclick = async () => {
     const btn = view.querySelector("#exam-generate");
     const restore = busy(btn, "规划 → 抽题 → 审核…");
-    view.querySelector("#exam-tip").textContent = "三角色 crew 正在跑，别关页面…";
+    view.querySelector("#exam-tip").textContent = "三角色 crew agent 正在跑，别关页面…";
     try {
       const out = await http.post("/api/research/exam/generate", {
         exam_type: type,
-        grade: view.querySelector("#exam-grade").value,
+        grade: R.grade,          // 与下拉 onchange 同步，避免读到旧渲染的 DOM 值
         subject: R.subject,
         total_score: Number(view.querySelector("#exam-score").value) || 100,
       });
       R.exam = out;
       R.compare[out.grade || R.grade] = null;
+      R.examPapers = null;        // 刚生成的卷要立刻出现在出卷记录里
       toast(`试卷 #${out.paper_id} 已生成`, "ok");
       renderExam(view, ctx);
     } catch (err) {
@@ -269,6 +374,153 @@ async function renderExam(view, ctx) {
   };
 
   if (plan) bindExamResult(view, ctx, plan, classes);
+
+  // 出卷记录：整行可点，点开是这份卷的题库详情（含答案与解析）
+  view.querySelectorAll("[data-paper-open]").forEach((row) => {
+    row.onclick = () => openPaperDetail(Number(row.dataset.paperOpen));
+  });
+}
+
+/* ---------------------------------------------------------------- 出卷记录 */
+/* 试卷名称 / 出卷时间 / 分配班级 —— 组长要回答的三件事。
+   题数与满分是附赠信息：一眼看出"这份卷是不是完整推送了"。 */
+function examPapersHTML(data) {
+  const items = data?.items || [];
+
+  const head = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="card-title">出卷记录</div>
+      <span class="pill">${items.length} 份</span>
+    </div>
+    <div class="card-sub">点任意一行查看当次试卷的题目详情（含标准答案与解析）</div>`;
+
+  if (!items.length) {
+    return `<section class="card card-pad" style="margin-top:20px">${head}
+      <div style="margin-top:12px">${emptyState(
+        `${R.grade}还没有出过卷子`,
+        "在上面生成一份，它会立刻出现在这里",
+        "file")}</div>
+    </section>`;
+  }
+
+  return `<section class="card card-pad" style="margin-top:20px">${head}
+    <div class="table-wrap" style="margin-top:12px">
+      <table class="table paper-table">
+        <thead><tr>
+          <th>试卷名称</th><th>出卷时间</th><th>分配班级</th><th>状态</th>
+        </tr></thead>
+        <tbody>${items.map(paperRowHTML).join("")}</tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+function paperRowHTML(p) {
+  const status = p.status === "published"
+    ? `<span class="pill pill-green">已定稿</span>`
+    : `<span class="pill pill-orange">未定稿</span>`;
+
+  const cls = (p.class_names || []).length
+    ? p.class_names.map((n) => `<span class="chip" style="cursor:default">${esc(n)}</span>`).join("")
+    : `<span class="tiny">未分配</span>`;
+
+  return `<tr data-paper-open="${p.paper_id}">
+    <td>
+      <div style="font-weight:500">
+        <span class="paper-id">#${p.paper_id}</span>${esc(p.title)}
+      </div>
+      <div class="tiny">
+        ${esc(EXAM_TYPE_CN[p.exam_type] || p.exam_type)} · ${p.question_count} 题 ·
+        ${p.full_score ? `满分 ${fixed(p.full_score, 0)}` : "满分待定稿"}
+      </div>
+    </td>
+    <td class="tiny" style="white-space:nowrap">${dateOf(p.created_at)}</td>
+    <td>${cls}</td>
+    <td>${status}</td>
+  </tr>`;
+}
+
+/* 点开一份卷：先弹空壳再灌内容，组长能看到"在加载"而不是卡住无反应 */
+async function openPaperDetail(paperId) {
+  const ov = modal({
+    title: "试卷详情",
+    sub: "正在加载…",
+    body: `<div class="skeleton" style="height:200px"></div>`,
+    actions: [{ label: "关闭" }],
+  });
+  // 题目详情要横向铺开：默认 560px 会把题干挤成一条竖线
+  ov.querySelector(".modal")?.classList.add("modal-wide");
+  const bd = ov.querySelector(".modal-bd");
+
+  try {
+    const d = await http.get(`/api/research/exam/${paperId}/detail`);
+    ov.querySelector(".modal-hd h3").textContent = d.paper.title;
+    ov.querySelector(".modal-hd .card-sub").textContent = [
+      `#${paperId}`,
+      d.paper.grade,
+      EXAM_TYPE_CN[d.paper.exam_type] || d.paper.exam_type,
+      `${d.question_count} 题`,
+      d.drafted ? `满分 ${fixed(d.full_score, 0)}` : "分值待定稿",
+      d.paper.class_names.length ? `推送：${d.paper.class_names.join("、")}` : "未分配班级",
+    ].join(" · ");
+    bd.innerHTML = paperDetailHTML(d);
+  } catch (err) {
+    bd.innerHTML = errorBox(err.detail || "试卷详情加载失败");
+  }
+}
+
+function paperDetailHTML(d) {
+  const rows = (d.questions || []).map((q) => {
+    const opts = parseOptions(q.options);
+    const brief = String(q.content || "").replace(/\s+/g, " ").slice(0, 56);
+    return `<tr>
+      <td class="num">${q.seq}</td>
+      <td>${QTYPE[q.question_type] || q.question_type}</td>
+      <td class="num">${q.score == null ? `<span class="tiny">待定</span>` : fixed(q.score, 1)}</td>
+      <td class="tiny">${esc(q.kp_name || q.kp_id || "—")}</td>
+      <td>
+        <details class="paper-q">
+          <summary>${esc(brief)}${String(q.content || "").length > 56 ? "…" : ""}</summary>
+          <div class="paper-q-body">
+            <div class="md">${md(q.content)}</div>
+            ${opts.length ? `<div class="paper-opts">
+              ${opts.map((o) => `<div>${esc(o)}</div>`).join("")}
+            </div>` : ""}
+            <div class="paper-qa"><b>答案：</b>${esc(q.answer || "—")}</div>
+            ${q.analysis ? `<div class="paper-qa"><b>解析：</b><div class="md">${md(q.analysis)}</div></div>` : ""}
+          </div>
+        </details>
+      </td>
+    </tr>`;
+  }).join("");
+
+  return `<div class="table-wrap">
+    <table class="table">
+      <thead><tr>
+        <th class="num" style="width:52px">题号</th>
+        <th style="width:64px">题型</th>
+        <th class="num" style="width:64px">分值</th>
+        <th style="width:110px">知识点</th>
+        <th>题目</th>
+      </tr></thead>
+      <tbody>${rows || `<tr><td colspan="5" class="muted">这份卷子还没有可显示的题目</td></tr>`}</tbody>
+    </table>
+  </div>
+  ${d.drafted ? "" : `<div class="alert alert-info" style="margin-top:4px"><span class="dot"></span>
+    <div>这份卷还没定稿：题目已抽出，但每题分值要等「定稿并推送」时才固化。</div></div>`}`;
+}
+
+/* 选项在库里是 JSON 数组字符串（["A. …","B. …"]），老数据可能不是合法 JSON。
+   解析不出来就返回空 —— 不猜、不把原始串糊到页面上（题干里通常也写着选项）。 */
+function parseOptions(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
 }
 
 function examResultHTML(exam, classes) {
@@ -276,8 +528,17 @@ function examResultHTML(exam, classes) {
   const items = exam.plan?.items || [];
   const passed = review.passed;
   const metrics = review.metrics || {};
-  const scalar = Object.entries(metrics).filter(([, v]) => typeof v !== "object" || v === null);
-  const dists = Object.entries(metrics).filter(([, v]) => v && typeof v === "object");
+  // not_checked 是"本次考试类型不检查哪些指标"的清单，不是指标本身，先剔出去
+  const notChecked = new Set(metrics.not_checked || []);
+  const entries = Object.entries(metrics).filter(([k]) => k !== "not_checked");
+  const scalar = entries.filter(([, v]) => typeof v !== "object" || v === null);
+  const dists = entries.filter(([, v]) => v && typeof v === "object");
+
+  // null 有两种意思：本次不检查（有 not_checked 说明）/ 真的没拿到数
+  const statText = (k, v) => {
+    if (v === null || v === undefined) return notChecked.has(k) ? "本次不检查" : "—";
+    return metricValue(v);
+  };
 
   return `<section class="card card-pad">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -291,10 +552,13 @@ function examResultHTML(exam, classes) {
       <div>${esc(review.summary)}</div></div>` : ""}
 
     <div class="grid grid-4" style="margin-top:18px">
-      ${scalar.map(([k, v]) => `<div class="card stat" style="box-shadow:none;background:var(--bg-soft);border-color:transparent">
+      ${scalar.map(([k, v]) => {
+        const na = (v === null || v === undefined) && notChecked.has(k);
+        return `<div class="card stat" style="box-shadow:none;background:var(--bg-soft);border-color:transparent">
         <div class="stat-label">${esc(metricLabel(k))}</div>
-        <div class="stat-value" style="font-size:26px">${esc(metricValue(v))}</div>
-      </div>`).join("")}
+        <div class="stat-value" style="font-size:${na ? "15px" : "26px"};${na ? "color:var(--ink-3);line-height:2.2" : ""}">${esc(statText(k, v))}</div>
+      </div>`;
+      }).join("")}
     </div>
 
     <div class="tiny" style="margin:20px 0 8px">配额表 QuotaPlan（可打印给组长人工改）</div>
@@ -303,8 +567,8 @@ function examResultHTML(exam, classes) {
         <thead><tr><th>知识点</th><th>章节</th><th class="num">题数</th><th>难度</th><th>题型</th><th>入选理由</th></tr></thead>
         <tbody>
           ${items.map((it) => `<tr>
-            <td>${esc(kpName(it.kp_id))}</td>
-            <td class="tiny">${esc(kpName(it.chapter_id))}</td>
+            <td>${esc(kpLabel(it.kp_id))}</td>
+            <td class="tiny">${esc(chapterLabel(it.chapter_id))}</td>
             <td class="num">${it.question_count}</td>
             <td>${DIFF[it.difficulty] || it.difficulty}</td>
             <td>${QTYPE[it.question_type] || it.question_type}</td>
@@ -326,45 +590,86 @@ function examResultHTML(exam, classes) {
 
     ${(exam.gaps || []).length ? `<div class="alert alert-warn" style="margin-top:16px">
       <span class="dot"></span>
-      <div><b>抽题缺口</b><br/>${exam.gaps.map((g) => esc(g)).join("<br/>")}</div></div>` : ""}
+      <div><b>抽题缺口</b><br/>${exam.gaps.map((g) => esc(gapText(g))).join("<br/>")}</div></div>` : ""}
 
     <div class="divider"></div>
-    <div class="card-title" style="font-size:15px">定稿并布置</div>
-    <div class="card-sub">选择目标班级；布置后由演示脚本合成作答，再回到「考后分析」跑 R-04。</div>
-    <div class="chip-set" id="assign-classes" style="margin-top:12px">
-      ${(classes || []).map((c) => `<button type="button" class="chip" data-cid="${c.class_id}">${esc(c.class_name)}</button>`).join("")
+    <div class="card-title" style="font-size:15px">定稿并推送给年级</div>
+    <div class="card-sub">选定班级 → 推送。推送到班级后：该班的科任老师在「待批改 → 按试卷」看到这份卷，该班学生在「考试」模块开考。</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:12px">
+      <div class="tiny">目标班级（本年级）</div>
+      <div class="spacer" style="flex:1"></div>
+      <button type="button" class="btn btn-sm btn-ghost" id="assign-all">全选本年级</button>
+    </div>
+    <div class="chip-set" id="assign-classes" style="margin-top:8px">
+      ${(classes || []).map((c) => `<button type="button" class="chip" data-cid="${c.class_id}">${esc(c.class_name)}
+        <span class="kp-id">${c.student_count ?? ""}人</span></button>`).join("")
         || '<span class="tiny">该年级暂无班级数据，请先在管理后台建班</span>'}
     </div>
     <div class="form-actions">
-      <button class="btn btn-primary" id="exam-assign">定稿布置</button>
-      <span class="tiny">布置后 status → published</span>
+      <button class="btn btn-primary" id="exam-assign">定稿并推送</button>
+      <span class="tiny">定稿后 status → published，卷面题目与每题分值同时固化</span>
     </div>
+    <div id="assign-result"></div>
   </section>`;
 }
 
 function bindExamResult(view, ctx, exam, classes) {
   const chosen = new Set();
-  view.querySelectorAll("#assign-classes .chip").forEach((chip) => {
+  const chips = [...view.querySelectorAll("#assign-classes .chip")];
+
+  const paint = () => chips.forEach((c) => c.classList.toggle("active", chosen.has(Number(c.dataset.cid))));
+
+  chips.forEach((chip) => {
     chip.onclick = () => {
       const cid = Number(chip.dataset.cid);
       if (chosen.has(cid)) chosen.delete(cid); else chosen.add(cid);
-      chip.classList.toggle("active", chosen.has(cid));
+      paint();
     };
   });
+
+  // 「按年级推送」的落地：教研组长的可见范围本来就是 (年级 × 学科)，
+  // 这里的班级都是本年级的班，一键全选就等于整年级推送。
+  const allBtn = view.querySelector("#assign-all");
+  if (allBtn) {
+    allBtn.onclick = () => {
+      const allOn = chips.length > 0 && chosen.size === chips.length;
+      chosen.clear();
+      if (!allOn) chips.forEach((c) => chosen.add(Number(c.dataset.cid)));
+      paint();
+      allBtn.textContent = allOn ? "全选本年级" : "清空选择";
+    };
+  }
 
   const btn = view.querySelector("#exam-assign");
   if (!btn) return;
   btn.onclick = async () => {
     if (!chosen.size) { toast("至少选一个班级", "err"); return; }
-    const restore = busy(btn, "布置中…");
+    const restore = busy(btn, "推送中…");
     try {
-      await http.post(`/api/research/exam/${exam.paper_id}/assign`, { class_ids: [...chosen] });
-      toast("已定稿 published，可以安排考试了", "ok");
-      btn.textContent = "已布置";
+      const out = await http.post(`/api/research/exam/${exam.paper_id}/assign`,
+        { class_ids: [...chosen] });
+
+      // 回显影响面：组长点完最想知道"到底发给谁了、多少人要考"
+      const box = view.querySelector("#assign-result");
+      if (box) {
+        box.innerHTML = `<div class="alert alert-ok" style="margin-top:16px">
+          <span class="dot"></span>
+          <div>
+            <div style="font-weight:500;margin-bottom:4px">
+              已推送到 ${out.classes.length} 个班 · ${out.student_count} 名学生 · ${out.teacher_count} 位科任老师
+            </div>
+            <div style="font-size:13px;line-height:1.8">
+              卷面 ${out.question_count} 题 · 满分 ${out.full_score} 分（每题分值已固化）<br/>
+              ${out.classes.map((c) => `${esc(c.grade)}${esc(c.name)}（${c.students}人）`).join(" · ")}
+            </div>
+          </div></div>`;
+      }
+      toast(`已推送：${out.student_count} 名学生可以开考`, "ok");
+      btn.textContent = "已推送";
       btn.disabled = true;
     } catch (err) {
       restore();
-      toast(err.detail || "布置失败", "err");
+      toast(err.detail || "推送失败", "err");
     }
   };
 }
@@ -372,57 +677,119 @@ function bindExamResult(view, ctx, exam, classes) {
 /* ---------------------------------------------------------------- 考后分析 R-04 */
 async function renderAnalysis(view, ctx) {
   const ana = R.analysis;
-  const abnormal = R.abnormal ?? (R.abnormal = (await http.get("/api/research/questions/abnormal", { subject: R.subject })) || []);
+
+  /* 试卷选择用「出卷记录」那份清单（同一个缓存、同一个接口），不让组长手敲 paper_id。
+     R.examPapers 在切年级/生成新卷时已被置空，这里补一次懒加载即可。
+     首次进来要等一次请求：先铺骨架，否则页面会停在上一个 tab 的内容上。 */
+  if (!R.examPapers) {
+    view.innerHTML = `<div class="page-head"><div class="eyebrow">考后分析 · R-04</div>
+      <h1 class="page-title">正在取出卷记录…</h1></div>
+      <div class="skeleton" style="height:180px"></div>`;
+    R.examPapers = (await http.get("/api/research/exam/papers",
+      { grade: R.grade, subject: R.subject })) || { total: 0, items: [] };
+  }
+  const papers = R.examPapers.items || [];
+  /* 同届出过两次月考就会撞名（都叫「初三数学月考卷」），
+     只有重名时才补 #id —— 平时不拿编号干扰阅读。 */
+  const nameCount = {};
+  papers.forEach((p) => { nameCount[p.title] = (nameCount[p.title] || 0) + 1; });
+  const optionText = (p) => (nameCount[p.title] > 1 ? `${p.title}（#${p.paper_id}）` : p.title);
+  /* 默认选中最新一份「已定稿推送」的卷：只有推给班级才有学生作答，
+     否则一进来就默认一份 draft 卷，点分析必然 409。找不到就退回第一份。 */
+  const defaultPid = (papers.find((p) => p.status === "published") || papers[0] || {}).paper_id;
 
   view.innerHTML = `
     <div class="page-head">
       <div class="eyebrow">考后分析 · R-04</div>
       <h1 class="page-title">上一份卷子的分析，决定下一份卷子</h1>
-      <p class="page-sub">Pandas 算得分率 / 难度系数 P / 区分度 D，异常题写回 quality_flag；下次出卷时这些题自动降权或剔除 —— 这是「考后 → 考前」的回流。</p>
+      <p class="page-sub">Pandas 算得分率 / 难度系数 P / 区分度 D，异常题写回 quality_flag；下次出卷时这些题降权沉底 —— 这是「考后 → 考前」的回流。</p>
     </div>
 
     <div class="grid grid-2" style="align-items:start;margin-bottom:18px">
       <section class="card card-pad">
         <div class="card-title">触发分析</div>
         <div class="card-sub">需要该试卷已有已判分的作答数据</div>
-        <div style="display:flex;gap:8px;margin-top:16px">
-          <input class="input" id="ana-paper" type="number" min="1" placeholder="试卷 id（exam_papers.id）" />
-          <button class="btn btn-primary" id="ana-run">开始分析</button>
+
+        <div class="field" style="margin-top:16px">
+          <label for="ana-paper">选一份试卷</label>
+          <select class="select" id="ana-paper" ${papers.length ? "" : "disabled"}>
+            ${papers.length
+              ? papers.map((p) => `<option value="${p.paper_id}"${p.paper_id === defaultPid ? " selected" : ""}>${esc(optionText(p))}</option>`).join("")
+              : '<option value="">该年级还没有出过的卷子</option>'}
+          </select>
+          <div class="tiny" id="ana-meta" style="margin-top:8px;line-height:1.7"></div>
         </div>
-        <div class="tiny" style="margin-top:10px">流程：Pandas 算指标 → 数据分析师 → 命题质量专家 → 教研组长汇总</div>
+
+        <div class="form-actions" style="margin-top:14px">
+          <button class="btn btn-primary" id="ana-run" ${papers.length ? "" : "disabled"}>开始分析</button>
+          <span class="tiny">Pandas 算指标 → 数据分析师 → 命题质量专家 → 教研组长</span>
+        </div>
       </section>
 
       <section class="card card-pad">
-        <div class="card-title">历史异常题</div>
-        <div class="card-sub">R-04 写回、R-08 消费的同一批题</div>
-        <div class="table-wrap" style="margin-top:12px;max-height:210px;overflow:auto">
-          <table class="table">
-            <thead><tr><th>题号</th><th>知识点</th><th>难度</th><th>题干</th></tr></thead>
-            <tbody>
-              ${abnormal.map((q) => `<tr>
-                <td>#${q.id}</td>
-                <td class="tiny">${esc(kpName(q.kp_id))}</td>
-                <td>${DIFF[q.difficulty] || q.difficulty}</td>
-                <td class="muted">${esc(q.content || "")}…</td>
-              </tr>`).join("") || `<tr><td colspan="4" class="muted">暂无异常题：先对一份有作答的试卷跑 R-04</td></tr>`}
-            </tbody>
-          </table>
+        <div class="card-title">写回之后会发生什么</div>
+        <div class="card-sub">异常题不用人工处理，下次出卷自动生效</div>
+        <div class="list" style="margin-top:10px">
+          <div class="list-row">
+            <span class="pill pill-blue">1</span>
+            <div class="grow">
+              <div class="title" style="font-size:13.5px">落库：questions.quality_flag → abnormal</div>
+              <div class="meta">本次判出的异常题，逐条见下方「异常题诊断卡」（带 P / D / 成因）</div>
+            </div>
+          </div>
+          <div class="list-row">
+            <span class="pill pill-blue">2</span>
+            <div class="grow">
+              <div class="title" style="font-size:13.5px">下次出卷自动沉底</div>
+              <div class="meta">R-08 抽题时 abnormal 排在候选池末尾，只有本题库不够才被选中</div>
+            </div>
+          </div>
+          <div class="list-row">
+            <span class="pill pill-blue">3</span>
+            <div class="grow">
+              <div class="title" style="font-size:13.5px">不需要再翻一份"历史异常题清单"</div>
+              <div class="meta">跨卷跨年级混在一起的列表既不能操作、又和上面的诊断卡重复，已下线</div>
+            </div>
+          </div>
         </div>
       </section>
     </div>
 
     <div id="ana-result">${ana ? analysisHTML(ana) : ""}</div>`;
 
-  view.querySelector("#ana-run").onclick = async () => {
-    const pid = Number(view.querySelector("#ana-paper").value);
-    if (!pid) { toast("请输入试卷 id", "err"); return; }
-    const btn = view.querySelector("#ana-run");
+  const sel = view.querySelector("#ana-paper");
+  const metaEl = view.querySelector("#ana-meta");
+
+  /* 选中卷的元信息：题数 / 满分 / 是否已推送 / 出卷时间。
+     「已推送」很重要——没推送给班级就没有学生作答，分析会 409。 */
+  const paintMeta = () => {
+    const p = papers.find((x) => String(x.paper_id) === sel.value);
+    if (!p) {
+      metaEl.textContent = "先去「智能出卷」生成一份卷子，并定稿推送给班级";
+      return;
+    }
+    const pushed = p.status === "published"
+      ? '<span class="pill pill-green">已定稿推送</span>'
+      : '<span class="pill pill-orange">未推送</span>';
+    metaEl.innerHTML = `
+      ${esc(EXAM_TYPE_CN[p.exam_type] || p.exam_type || "")} ·
+      ${p.question_count} 题 ·
+      ${p.full_score ? `满分 ${fixed(p.full_score, 0)}` : "分值待定稿"}
+      ${pushed}<br/>
+      出卷时间 ${dateOf(p.created_at)}`;
+  };
+  paintMeta();
+  if (papers.length) sel.onchange = paintMeta;
+
+  const btn = view.querySelector("#ana-run");
+  btn.onclick = async () => {
+    const pid = Number(sel.value);
+    if (!pid) { toast("请先选择一份试卷", "err"); return; }
     const restore = busy(btn, "分析中…");
     try {
       const out = await http.post(`/api/research/paper/${pid}/analyze`);
       R.analysis = out;
       view.querySelector("#ana-result").innerHTML = analysisHTML(out);
-      R.abnormal = null;
       toast("分析完成，异常题已写回", "ok");
       view.querySelector("#ana-result").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
@@ -441,7 +808,8 @@ function analysisHTML(ana) {
   return `
     <section class="card card-pad" style="margin-bottom:16px">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <div class="card-title">试卷 #${ana.paper_id} 分析报告</div>
+        <div class="card-title">${esc(ana.paper_title || "试卷")} · 分析报告</div>
+        <span class="pill pill-dark">#${ana.paper_id}</span>
         <span class="pill pill-blue">${metrics.length} 题</span>
         <span class="pill pill-red">${abnormal.length} 道异常题</span>
         <span class="pill pill-green">已写回 ${ana.abnormal_written ?? 0} 道</span>
@@ -452,11 +820,12 @@ function analysisHTML(ana) {
       <div class="tiny" style="margin:18px 0 8px">逐题指标（P 越低越难，D 越低区分度越差）</div>
       <div class="table-wrap" style="max-height:320px;overflow:auto">
         <table class="table">
-          <thead><tr><th>题号</th><th>知识点</th><th class="num">得分率</th><th class="num">难度 P</th><th class="num">区分度 D</th><th>判定</th></tr></thead>
+          <thead><tr><th>题号</th><th>知识点</th><th class="num">满分</th><th class="num">得分率</th><th class="num">难度 P</th><th class="num">区分度 D</th><th>判定</th></tr></thead>
           <tbody>
             ${metrics.map((m) => `<tr>
               <td>#${m.q_id}</td>
-              <td class="tiny">${esc(kpName(m.kp_id))}</td>
+              <td class="tiny">${esc(kpLabel(m.kp_id))}</td>
+              <td class="num tiny">${fixed(m.full_score, 1)}</td>
               <td class="num">${pct(m.score_rate)}</td>
               <td class="num">${fixed(m.P, 2)}</td>
               <td class="num">${fixed(m.D, 2)}</td>
@@ -479,7 +848,7 @@ function analysisHTML(ana) {
               <span class="pill pill-red">#${it.q_id}</span>
               <div class="grow">
                 <div class="title" style="font-size:13.5px">${mdInline(it.issue || "")}</div>
-                <div class="meta" style="line-height:1.65">P=${fixed(it.P, 2)} · D=${fixed(it.D, 2)} · ${esc(kpName(it.kp_id))}<br/>${mdInline(it.cause || "")}</div>
+                <div class="meta" style="line-height:1.65">P=${fixed(it.P, 2)} · D=${fixed(it.D, 2)} · ${esc(kpLabel(it.kp_id))}<br/>${mdInline(it.cause || "")}</div>
               </div>
             </div>`).join("") || emptyState("没有异常题", "指标全部落在正常区间", "check")}
         </div>
@@ -498,7 +867,8 @@ function analysisHTML(ana) {
         <div class="divider"></div>
         <div class="tiny" style="line-height:1.9">
           这些异常题已写回 questions.quality_flag = abnormal，<br/>
-          下一次「智能出卷」抽题时会自动降权 50% 或直接剔除。
+          下一次「智能出卷」抽题时它们排在候选池末尾 —— 同知识点下优先抽正常题，
+          只有正常题不够时才会被选中（不会被删掉）。
         </div>
       </section>
     </div>`;

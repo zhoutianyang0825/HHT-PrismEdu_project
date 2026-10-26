@@ -13,9 +13,12 @@ from app.graphs.student.quiz_graph import rank_targets
 from app.services.selection_engine import difficulty_for, select_quiz_questions
 
 
-def _cand(qid: int, kp: str, diff: str) -> dict:
-    """造一道候选题的最小形态（与 fetch_candidates_by_kp 返回结构对齐）。"""
-    return {"id": qid, "kp_id": kp, "difficulty": diff}
+def _cand(qid: int, kp: str, diff: str, qtype: str = "fill") -> dict:
+    """造一道候选题的最小形态（与 fetch_candidates_by_kp 返回结构对齐）。
+
+    qtype 默认 fill（客观题）：老用例都是纯难度/配额断言，不关心题型。
+    """
+    return {"id": qid, "kp_id": kp, "difficulty": diff, "question_type": qtype}
 
 
 def test_quiz_targets_weak_kps():
@@ -99,3 +102,59 @@ def test_rank_targets_order():
     assert ids.index("kp_y") < ids.index("kp_x"), "同掌握度时高错频应排前面"
     assert ids[-1] == "kp_z", "掌握度最高的应排最后"
     assert targets[0]["reason"] == "近30天连错3次"
+
+
+# =====================================================================
+# 题型配额（2026-10-26 补题库后新增）
+# =====================================================================
+def test_quiz_subjective_cap_skips_not_stops():
+    """★ 主观题配额：超了就跳过这道、继续抽客观题，而不是整个知识点停掉。
+
+    踩坑背景：给 63 个知识点各补 2~3 道解答题后，题库主观题从 22 涨到近 200。
+    如果按顺序无脑取前 N，一个知识点 5 道题里 3 道主观，8 题卷子能抽出 4~5 道——
+    而主观题要等老师批改（is_correct=NULL），学生做完看不到分，
+    "即时反馈"的诊断测验就废了。
+    """
+    targets = [{"kp_id": "kp_a", "p_known": 0.20, "reason": "薄弱"}]   # p<0.4 → easy
+    candidates = {"kp_a": [
+        _cand(1, "kp_a", "easy", "subjective"),     # 主观题排在最前（模拟真实顺序）
+        _cand(2, "kp_a", "easy", "subjective"),
+        _cand(3, "kp_a", "easy", "fill"),
+    ]}
+
+    picked, gaps = select_quiz_questions(
+        targets, candidates, total=8, per_kp_cap=3, subjective_cap=1,
+    )
+
+    subj = [p for p in picked if p.get("question_type") == "subjective"]
+    assert len(subj) == 1, f"主观题应被限到 1 道，实际 {len(subj)} 道"
+    assert 3 in [p["id"] for p in picked], "主观题超配额后跳过了，但客观题也必须被抽到"
+    assert not gaps, "有题可选却报缺口，说明跳过逻辑写成了中断"
+
+
+def test_quiz_subjective_cap_zero_gives_pure_objective_paper():
+    """subjective_cap=0 → 纯客观卷（老师要快速判分的场景）。"""
+    targets = [{"kp_id": "kp_a", "p_known": 0.20, "reason": "薄弱"}]
+    candidates = {"kp_a": [
+        _cand(1, "kp_a", "easy", "subjective"),
+        _cand(2, "kp_a", "easy", "fill"),
+    ]}
+
+    picked, _ = select_quiz_questions(
+        targets, candidates, total=8, per_kp_cap=2, subjective_cap=0,
+    )
+
+    assert all(p.get("question_type") != "subjective" for p in picked)
+    assert [p["id"] for p in picked] == [2]
+
+
+def test_quiz_objective_only_pool_unaffected_by_cap():
+    """池子里全是客观题时，配额这道闸完全不影响结果（老行为不变）。"""
+    targets = [{"kp_id": "kp_a", "p_known": 0.20, "reason": "薄弱"}]
+    candidates = {"kp_a": [
+        _cand(1, "kp_a", "easy"), _cand(2, "kp_a", "easy"), _cand(3, "kp_a", "easy"),
+    ]}
+
+    picked, _ = select_quiz_questions(targets, candidates, total=8, per_kp_cap=2)
+
+    assert [p["id"] for p in picked] == [1, 2]

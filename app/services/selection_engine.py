@@ -53,21 +53,31 @@ def select_quiz_questions(
     total: int = 8,
     per_kp_cap: int = 2,
     exclude_ids: set[int] | None = None,
+    subjective_cap: int = 2,
 ) -> tuple[list[dict], list[str]]:
     """S-10 诊断测验配题：按 Top5 知识点逐点抽题。
 
     得到的数据：target_points=[{"kp_id": "kp_crossmult", "p_known": 0.33, "reason": "近30天连错3次"}, ...]
                 （已按优先级排序）；candidates_by_kp={"kp_crossmult": [{"id": 12,
                 "difficulty": "easy"}, ...], "kp_peifang": []}；total=8；per_kp_cap=2；
-                exclude_ids={31, 47}
+                exclude_ids={31, 47}；subjective_cap=2
     要做的操作：逐点定难度档→过滤近期做过的→目标档优先、他档兜底→单点 ≤2 截断→总量封顶
+                → 主观题整卷 ≤ subjective_cap 道
     返回：([{"id": 12, "kp_id": "kp_crossmult", "difficulty": "easy"}, ...],
            ["kp_peifang: 题库无可用题（目标档 medium，池中 0 题）"])
     为什么：S-10 的核心配题规则，抽题必须可复现，所以做成纯函数便于单测
+
+    ★ 为什么要 subjective_cap（题型配额）：
+        2026-10-26 给 63 个知识点各补了 2~3 道解答题，题库里主观题从 22 道涨到近 200 道。
+        不加这道闸，一个知识点 5 道题里 3 道是主观题，8 题卷子可能抽出 4~5 道——
+        而主观题在对话/测验里要等老师批改（is_correct=NULL），学生做完看不到分，
+        "即时反馈"的诊断测验就失去意义了。默认整卷最多 2 道主观题。
+        传 0 = 完全不要主观题（纯客观卷）；传 None 会 TypeError，想要不限就别传这个参数以外的方式改。
     """
     exclude_ids = exclude_ids or set()   # None → 空集合：下面统一用 `in set`，不用再判空
     picked: list[dict] = []             # 已选中的题（最终 8 道）
     gaps: list[str] = []                # 缺口说明（诚实记账，不拿来凑数）
+    picked_subj = 0                     # 已选中的主观题数（整卷上限用）
 
     for tp in target_points:
         # 总配额用完就停：不因为"还有知识点没照顾"而超发（8 题就是 8 题）
@@ -91,7 +101,23 @@ def select_quiz_questions(
 
         # 取几道：单点上限 与 总量剩余额度 取小。
         #   例：第 4 个点时 picked=6，total=8 → min(2, 2)=2；第 5 个点时 picked=8 → 循环已 break。
-        take = in_order[: min(per_kp_cap, total - len(picked))]
+        quota = min(per_kp_cap, total - len(picked))
+
+        # 【主观题配额】配额用完时**跳过这一道、继续看后面的题**，而不是直接停。
+        #   直接停会让"池子里主观题排前面"的知识点白白少选一道客观题——
+        #   跳过才是"不要主观题，但客观题照抽"。
+        take: list[dict] = []
+        subj_in_take = 0
+        for c in in_order:
+            if len(take) >= quota:
+                break
+            if c.get("question_type") == "subjective":
+                if picked_subj + subj_in_take >= subjective_cap:
+                    continue
+                take.append(c)
+                subj_in_take += 1
+            else:
+                take.append(c)
 
         if not take:
             # 池子空（或全被 exclude 掉）：记缺口，继续下一个点。
@@ -99,12 +125,13 @@ def select_quiz_questions(
             gaps.append(f"{kp_id}: 题库无可用题（目标档 {want}，池中 {len(pool)} 题）")
 
         picked.extend(take)             # list.extend：把 take 的元素逐个并入 picked
+        picked_subj += subj_in_take
 
     return picked, gaps
 
 
 def fetch_candidates_by_kp(kp_ids: list[str]) -> dict[str, list[dict]]:
-    """从 PG 题库按知识点批量取候选池（本文件唯一碰数据库的函数）。
+    """从 PG 题库 按知识点 批量取候选池（本文件唯一碰数据库的函数）。
 
     得到的数据：kp_ids=["kp_crossmult", "kp_peifang"]（传 [] 会生成非法 IN ()）
     要做的操作：一条 IN 查询捞回所有点的题，剔除 disabled，按 kp_id 分组
@@ -114,7 +141,7 @@ def fetch_candidates_by_kp(kp_ids: list[str]) -> dict[str, list[dict]]:
     为什么：取数与策略分离——这里只备料（不排序、不滤难度），定档和排序都归上层引擎
     """
     from app.db.session import get_session_factory
-    from app.models import Question
+    from app.models import KnowledgePoint, Question
 
     session = get_session_factory()()
     try:
@@ -125,7 +152,13 @@ def fetch_candidates_by_kp(kp_ids: list[str]) -> dict[str, list[dict]]:
                 #                quality_flag（abnormal 降权要用它排序）
                 # 对 M2 的调用方无影响——字典多两个键，select_quiz_questions 只读 id/difficulty。
                 Question.question_type, Question.quality_flag,
+                # ★ 章节归属必须跟着候选一起带出来：审核的"章节覆盖率"是按题上的
+                #   chapter_id 统计的。这里不给，covered 集合里全是 "unknown"，
+                #   覆盖率会永远算成 1/总章节数（假数据）。知识点表里本来就有归属，
+                #   反问 LLM 要 chapter_id 才是自找失真。
+                KnowledgePoint.chapter_id,
             )
+            .outerjoin(KnowledgePoint, KnowledgePoint.id == Question.kp_id)
             .where(Question.kp_id.in_(kp_ids))                    # 一次查完，避免 N+1 次查询
             .where(Question.quality_flag != "disabled")           # 判死刑的题永不出池
         ).all()
@@ -137,10 +170,11 @@ def fetch_candidates_by_kp(kp_ids: list[str]) -> dict[str, list[dict]]:
     #   若省掉这步，上层 candidates_by_kp.get(kp_id, []) 也能跑，但返回结构就不稳定
     #   （有时有键有时没键），断言和调试都变难。
     grouped: dict[str, list[dict]] = {kp: [] for kp in kp_ids}
-    for qid, kp, diff, qtype, flag in rows:
+    for qid, kp, diff, qtype, flag, chapter_id in rows:
         grouped[kp].append({
             "id": qid, "kp_id": kp, "difficulty": diff,
             "question_type": qtype, "quality_flag": flag,
+            "chapter_id": chapter_id,
         })
     return grouped
 
@@ -174,11 +208,27 @@ def _pool_sort_key(q: dict) -> tuple[int, int]:
     return (0 if q.get("quality_flag", "normal") == "normal" else 1, q["id"])
 
 
+def _kp_label(kp_id: str, kp_label: dict[str, str] | None) -> str:
+    """缺口文案里的知识点署名：有显示名就用名，没有才退回 id。
+
+    得到的数据：kp_id="kp_peifang"；kp_label={"kp_peifang": "配方法"}（可能为 None）
+    要做的操作：查一次映射，命中返回中文名
+    返回："配方法"；未命中或没传映射 → "kp_peifang"
+    为什么：缺口清单是给教研组长看的，"kp_discriminant: 1 题由 medium 档放宽补入"
+            这种句子得先在心里翻译一遍才能读，等于没写
+    """
+    if not kp_label:
+        return kp_id
+
+    return kp_label.get(kp_id) or kp_id
+
+
 def select_questions_by_quota(
     quota_items: list[dict],
     candidates_by_kp: dict[str, list[dict]],
     exclude_ids: set[int] | None = None,
     per_kp_cap: int = 2,
+    kp_label: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """按配额行逐条抽题（R-08 的选题核心）。
 
@@ -186,14 +236,18 @@ def select_questions_by_quota(
                               "question_type": "fill", "question_count": 4}, ...]；
                 candidates_by_kp（fetch_candidates_by_kp 输出）；
                 exclude_ids={31, 47}；
-                per_kp_cap=2
+                per_kp_cap=2；
+                kp_label={"kp_crossmult": "十字相乘法"}（缺口文案用的显示名，可空）
 
     要做的操作：单点跨行累计截断 → 过滤近期/已选 → 沿放宽链找题（题型硬约束、abnormal 沉底）
 
     返回：(
            [{"id": 12, "kp_id": "kp_crossmult", "difficulty": "medium", "quality_flag": "normal"}, ...],
-           ["kp_peifang: 配额 4 题超单知识点 2 题上限，按 2 题执行","kp_peifang: 1 题由 medium 档放宽补入", "kp_x: medium/fill 缺 2 题（…）"]
+           ["十字相乘法: 配额 4 题超单知识点 2 题上限，按 2 题执行",
+            "十字相乘法: 1 题由 medium 档放宽补入",
+            "配方法: medium/fill 缺 2 题（…）"]
         )
+        ★ kp_label 没传时，前缀退回落 kp_id（保持函数纯度与旧测试兼容）
 
     为什么：R-08 要求"配额可打印、抽题可复现、缺口不硬凑"，这三条都落在这个纯函数里
     """
@@ -205,6 +259,7 @@ def select_questions_by_quota(
 
     for item in quota_items:
         kp_id = item["kp_id"]
+        label = _kp_label(kp_id, kp_label)          # 缺口文案里给组长看的署名（名优先，id 兜底）
         want_type = item.get("question_type", "")   # 缺省空串 → 下面 `not want_type` 表示不限
         need = int(item["question_count"])
 
@@ -212,12 +267,12 @@ def select_questions_by_quota(
         #   为什么要累计：同一 kp 可能出现两行配额（如"填空 2 题 + 选择 2 题"），
         remain_cap = per_kp_cap - kp_used.get(kp_id, 0)
         if remain_cap <= 0:
-            gaps.append(f"{kp_id}: 超过单知识点 {per_kp_cap} 题上限，配额行被丢弃")
+            gaps.append(f"{label}: 超过单知识点 {per_kp_cap} 题上限，配额行被丢弃")
             continue   
                                        
         if need > remain_cap:
             # 透明化：配额行要 4 题、红线只剩 2 题 → 照实记录，别让组长对着结果发懵
-            gaps.append(f"{kp_id}: 配额 {need} 题超单知识点 {per_kp_cap} 题上限，按 {remain_cap} 题执行")
+            gaps.append(f"{label}: 配额 {need} 题超单知识点 {per_kp_cap} 题上限，按 {remain_cap} 题执行")
             need = remain_cap
 
         # ---- 过滤：近 7 天做过 + 本轮已选过 ----
@@ -247,7 +302,7 @@ def select_questions_by_quota(
         if lack > 0:
             # 缺口：放宽后仍不够 → 照实记账。绝不跨知识点借题、不随机补题。
             gaps.append(
-                f"{kp_id}: {item['difficulty']}/{want_type} 缺 {lack} 题"
+                f"{label}: {item['difficulty']}/{want_type} 缺 {lack} 题"
                 f"（放宽难度后仍不足，池中仅 {len(pool)} 题）"
             )
 
@@ -258,6 +313,6 @@ def select_questions_by_quota(
         kp_used[kp_id] = kp_used.get(kp_id, 0) + len(taken_from_pool)
 
         if reasons:
-            gaps.append(f"{kp_id}: " + "；".join(reasons))   # 放宽记录进缺口清单，透明可查
+            gaps.append(f"{label}: " + "；".join(reasons))   # 放宽记录进缺口清单，透明可查
 
     return picked, gaps

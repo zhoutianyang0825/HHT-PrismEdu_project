@@ -18,5 +18,7 @@ __pycache__/
 
 # 数据与模型产物（seed 源文件保留，生成产物不入库）
 data/generated/
+# 学生上传的手写解题图：运行时产物，几百 KB 起步，绝不入库
+data/uploads/
 *.log
 demo.mp4

@@ -40,6 +40,7 @@ from app.models import (
     Class,
     ErrorLog,
     ExamPaper,
+    ExamPaperQuestion,
     Homework,
     HomeworkQuestion,
     KnowledgePoint,
@@ -244,7 +245,8 @@ def ensure_learning_history(session, ids: dict, seed: int) -> None:
 def simulate_exam_answers(session, paper_id: int, seed: int, force: bool) -> None:
     """给试卷合成全班作答（闭环线二的"虚拟班级作答"一步）。
 
-    P/D 布局（按题目在卷内的序号 i，能力序 r=0 最弱 … n-1 最强，满分 f=100/题量）：
+    P/D 布局（按题目在卷内的卷面序号 i，能力序 r=0 最弱 … n-1 最强，
+              f=该题卷面真实分值，来自 exam_paper_questions.score）：
       i=0 过难：只有前 25%（强生）得分   → P=0.25，D=1.0 → 异常[过难]
       i=1 过易：最弱 k 人只拿步骤分      → P≈0.92，D≈0.30 → 异常[过易]
       i=2 区分度不足：人人得一半步骤分   → P=0.50，D=0.00 → 异常[区分度不足]
@@ -268,6 +270,24 @@ def simulate_exam_answers(session, paper_id: int, seed: int, force: bool) -> Non
     if not q_ids:
         raise SystemExit(f"[FAIL] 试卷 {paper_id} 的 quota_plan_json 里没有 question_ids，无法合成作答")
 
+    # 每题满分 + 卷面顺序：以 exam_paper_questions（定稿时固化）为准。
+    #   为什么要读真值：R-04 的 P = 均分 ÷ 该题满分，均摊公式会把
+    #   2.5 分的选择题当成 5.56 分、11 分的解答题当成 5.56 分，
+    #   "第 1 题过难 / 第 2 题过易"这套布局就全歪了 —— 脚本必须和 analyze 同口径。
+    #   未定稿的卷没有卷面表 → 退回均摊 + quota_plan 里的顺序（只为老卷兜底）。
+    paper_qs = session.execute(
+        select(ExamPaperQuestion.question_id, ExamPaperQuestion.score)
+        .where(ExamPaperQuestion.paper_id == paper_id)
+        .order_by(ExamPaperQuestion.seq)
+    ).all()
+    fallback_full = 100.0 / len(q_ids)
+    if paper_qs:
+        q_ids = [qid for qid, _ in paper_qs]
+        score_map = {qid: float(sc or 0) for qid, sc in paper_qs}
+    else:
+        score_map = {qid: fallback_full for qid in q_ids}
+        print(f"[exam] 提示：试卷 {paper_id} 尚未定稿（无卷面分值），按 100/{len(q_ids)} 均摊合成")
+
     existing = session.execute(
         select(StudentAnswer.id)
         .where(StudentAnswer.source_type == "exam", StudentAnswer.source_id == paper_id)
@@ -288,7 +308,6 @@ def simulate_exam_answers(session, paper_id: int, seed: int, force: bool) -> Non
     if n < 4:
         raise SystemExit(f"[FAIL] 学生人数 {n} 太少（至少 4 人），先跑一遍本脚本不带 --paper-id")
 
-    full = 100.0 / len(q_ids)            # 与 paper_analyze 的 full_score 公式保持一致
     n_tail = max(1, int(n * 0.27))       # 前后 27% 分组（analysis.py 同口径）
     hard_cut = int(n * 0.75)             # 过难题：r >= 75% 才得分
     # 过易题：最弱 k 人拿步骤分 m（见 docstring 的 u=0.08n 推导）
@@ -299,25 +318,26 @@ def simulate_exam_answers(session, paper_id: int, seed: int, force: bool) -> Non
     inserted = 0
     for rank, stu in enumerate(students):
         for i, qid in enumerate(q_ids):
+            f = score_map[qid]                            # 该题真实满分（不是均摊值）
             if i == 0:                                   # 过难
-                score = full if rank >= hard_cut else 0.0
+                score = f if rank >= hard_cut else 0.0
                 anomaly_plan.setdefault(qid, "过难")
             elif i == 1:                                 # 过易
-                score = full * miss_ratio if rank < k_easy_miss else full
+                score = f * miss_ratio if rank < k_easy_miss else f
                 anomaly_plan.setdefault(qid, "过易")
             elif i == 2:                                 # 区分度不足（人人步骤分）
-                score = full * 0.5
+                score = f * 0.5
                 anomaly_plan.setdefault(qid, "区分度不足")
             else:                                        # 正常题
                 threshold = int(n * 0.45) + (i % 5) - 2  # 少量错落，P 约 0.5~0.65
-                score = full if rank >= max(n_tail + 1, min(threshold, n - n_tail - 1)) else 0.0
+                score = f if rank >= max(n_tail + 1, min(threshold, n - n_tail - 1)) else 0.0
 
             session.add(StudentAnswer(
                 source_type="exam", source_id=paper_id,
                 question_id=qid, student_id=stu.id,
-                content=f"（虚拟作答·能力序{rank}）" + ("得满分" if score == full else
+                content=f"（虚拟作答·能力序{rank}）" + ("得满分" if score == f else
                                                   "步骤分" if score > 0 else "未得分"),
-                is_correct=(score == full),
+                is_correct=(score == f),
                 score=round(score, 2),
             ))
             inserted += 1
@@ -328,7 +348,7 @@ def simulate_exam_answers(session, paper_id: int, seed: int, force: bool) -> Non
     for qid, label in anomaly_plan.items():
         print(f"[exam]   题 {qid} -> {label}")
     print(f"[exam] 下一步：教研端 POST /api/research/paper/{paper_id}/analyze 跑 R-04，")
-    print(f"[exam]        再出一次卷看 abnormal 题被降权（或看 GET /api/research/questions/abnormal）")
+    print(f"[exam]        再出一次卷看 abnormal 题被降权（落位见出卷返回的配额表 review）")
 
 
 # =====================================================================

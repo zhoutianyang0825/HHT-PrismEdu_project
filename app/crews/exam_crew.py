@@ -7,6 +7,7 @@
  两种模式的硬指标：月考（错题命中率 ≥70%）/ 摸底（章节覆盖 ≥80%），见 PRD 5.5
 """
 import json
+from datetime import datetime
 
 from app.crews.llm_bridge import get_crewai_llm, to_crewai_tools
 from app.schemas.exam import QuotaItem, QuotaPlan, ReviewReport
@@ -26,25 +27,87 @@ HIT_RATE_MIN = 0.70       # 月考错题命中率下限
 CHAPTER_COVER_MIN = 0.80  # 摸底型章节覆盖率下限
 MAX_ROUNDS = 2            # 审核回退上限（PRD 5.5）
 
+# 学科/类型的中文名：标题是给人看的，直接把 "math"/"monthly" 拼进去会显示成
+# "初三math 月考卷"这种半截英文，组长在列表里还要反应一下
+SUBJECT_CN = {"math": "数学", "chinese": "语文", "english": "英语"}
+EXAM_TYPE_CN = {"monthly": "月考", "midterm": "期中", "final": "期末"}
+
+
+def _paper_title(grade: str, subject: str, exam_type: str) -> str:
+    """生成卷名，必须带上出卷日期。
+
+    得到的数据：grade="初三"、subject="math"、exam_type="monthly"
+
+    要做的操作：中文名拼装 + 末尾追加 %m-%d
+
+    返回："初三数学月考卷 · 10-26"
+
+    为什么带日期：
+        原来标题是固定模板，同一届出两次月考就是两份"初三数学月考卷"。
+        教研端列表、学生端考试卡片都靠标题区分卷子 —— 名字一撞，
+        18 题的卷和 17 题的卷看着像同一份，会被误判成"推送给 1 班却让 2 班看到了"。
+        （真事：卷 5/卷 6 同名，核对了一圈审计记录才发现是两份卷。）
+
+        日期只到天，是因为标题太长会挤掉列表里的题数与满分；
+        真要精确到某一份，看列表里的 #paper_id 即可。
+    """
+    stamp = datetime.now().strftime("%m-%d")
+    return f"{grade}{SUBJECT_CN.get(subject, subject)}{EXAM_TYPE_CN.get(exam_type, exam_type)}卷 · {stamp}"
+
 
 # =====================================================================
 # ① 命题规划师：唯一调 LLM 的环节
 # =====================================================================
+def _catalog_text(catalog: list[dict]) -> str:
+    """把课程目录 拼成 给命题规划师看的知识点/章节白名单。
+
+    得到的数据：catalog（fetch_chapter_catalog 输出）
+
+    要做的操作：逐章一行标题 + 其下知识点 id/名，缩进两格
+
+    返回：
+        "【章节白名单（chapter_id 只能从这里照抄）】
+         - ch_quadratic = 第21章 一元二次方程
+             下辖知识点：kp_crossmult=十字相乘法 / kp_peifang=配方法
+         - ch_rotation = 第23章 旋转
+             （本章暂无知识点记录）"
+
+    为什么：
+        LLM 只被告知"第21章 一元二次方程"这个中文名时，会自己造一个 ch_21_quad_eq 当 id，
+        而库里叫 ch_quadratic → 配额表章节列显示成谁都不认识的编码，
+        章节覆盖率统计也因为集合对不上而失真。给白名单才是治本。
+    """
+    lines = ["【章节白名单（chapter_id 只能从这里照抄，禁止自造）】"]
+    for ch in catalog:
+        lines.append(f"- {ch['chapter_id']} = {ch['chapter_name']}")
+        if ch["kp"]:
+            kp_text = " / ".join(f"{k['kp_id']}={k['name']}" for k in ch["kp"])
+            lines.append(f"    下辖知识点：{kp_text}")
+        else:
+            lines.append("    （本章暂无知识点记录）")
+    return "\n".join(lines)
+
+
 def _plan_quota(
     exam_type: str,
     grade: str,
     subject: str,
     hotspots: list[dict],
     mastery_summary: str = "",
+    catalog_text: str = "",
 ) -> QuotaPlan:
     """跑单 Agent crew，产出配额表（出题策略表）。
 
     得到的数据：exam_type="monthly"；grade="初三"；subject="math"；
                 hotspots=[{"kp_id": "kp_crossmult", "name": "十字相乘法", "wrong_count": 27}, ...]；
-                mastery_summary="kp_crossmult 0.31 / kp_peifang 0.52"（摸底型用，可空）
-    要做的操作：按考试类型拼规则文本，和热点 JSON 一起写进 Task description，kickoff 出表
+                mastery_summary="kp_crossmult 0.31 / kp_peifang 0.52"（摸底型用，可空）；
+                catalog_text （章节/知识点白名单文本，可空）
+
+    要做的操作：按考试类型拼规则文本，和热点 JSON、白名单一起写进 Task description，kickoff 出表
+
     返回：QuotaPlan(exam_type="monthly", total_score=100, items=[QuotaItem(...), ...])；
           LLM 输出不合规则退 _fallback_plan 的纯规则表
+
     为什么：配额是策略不是计算——LLM 只决定"选哪些点、各占多少"，抽题一律交给 Python
     """
     from crewai import Agent, Crew, Process, Task   # 陌生库 crewai：Agent/Task/Crew 见 llm_bridge 文件头
@@ -90,9 +153,13 @@ def _plan_quota(
             f"{rule_text}\n\n"
             f"年级错题热点（近30天，wrong_count 降序）：\n{hotspots_text}\n\n"
             + (f"班级掌握度摘要（avg_p_known 升序，最薄弱在前）：\n{mastery_summary}\n\n" if mastery_summary else "")
+            + (f"{catalog_text}\n\n" if catalog_text else "")
             + "请产出 QuotaPlan：每个知识点一行（kp_id/chapter_id/question_count/"
               "difficulty/question_type/reason），question_count 总和即整卷题量"
-              "（月考默认 20 题左右，摸底型默认 25 题左右）。reason 写清入选依据。"
+              "（月考默认 20 题左右，摸底型默认 25 题左右）。reason 写清入选依据。\n"
+              "★ 硬约束：kp_id 与 chapter_id 必须原样照抄上面白名单里的 id，"
+              "不许自己拼（如把「第21章 一元二次方程」写成 ch_21_quad_eq）；"
+              "一个知识点只属于它所在的那一章，chapter_id 取该知识点所在行的章节 id。"
         ),
         expected_output="符合 QuotaPlan schema 的结构化 JSON 配额表",
         agent=planner,
@@ -202,8 +269,10 @@ def check_paper_hard_metrics(
     # ---- 指标3：章节覆盖率（仅摸底型）----
     chapter_coverage = None            # None = 本次不检查
     if plan.exam_type in ("midterm", "final") and total_chapters > 0:
-        covered = {q.get("chapter_id", "unknown") for q in picked}
-        covered.discard("unknown")     # 兜底表的 unknown 不算已覆盖
+        covered = {q.get("chapter_id") for q in picked}
+        # unknown / None 不算已覆盖：兜底表给 "unknown"，还没回填章节的题给 None
+        covered.discard("unknown")
+        covered.discard(None)
         chapter_coverage = len(covered) / total_chapters
         if chapter_coverage < CHAPTER_COVER_MIN:
             problems.append(f"章节覆盖率 {chapter_coverage:.0%} < {CHAPTER_COVER_MIN:.0%}")
@@ -223,6 +292,12 @@ def check_paper_hard_metrics(
         "chapter_coverage": round(chapter_coverage, 3) if chapter_coverage is not None else None,
         "per_kp_max": max(per_kp.values()) if per_kp else 0,
         "total_questions": total_n,
+        # ★ 哪些指标"本次不检查"要明说：光给 null，组长的第一反应是"数据丢了"，
+        #   而不是"月考本来就不看章节覆盖"。前端据此显示「本次不检查」。
+        "not_checked": (
+            ["type_dist", "chapter_coverage"] if plan.exam_type == "monthly"
+            else ([] if hit_kp_ids else ["hit_rate"])
+        ),
     }
     return (len(problems) == 0), metrics, problems
 
@@ -249,8 +324,64 @@ def _relax_plan(plan: QuotaPlan) -> QuotaPlan:
     return QuotaPlan(exam_type=plan.exam_type, total_score=plan.total_score, items=items)
 
 
+def _fix_plan_ids(plan: QuotaPlan) -> tuple[QuotaPlan, list[str], dict[str, str]]:
+    """拿课程库纠正配额表里的 id（LLM 会自己拼不存在的 id，必须在校验前修掉）。
+
+    得到的数据：plan.items 里可能含 kp_sqrt（库里没有）、chapter_id="ch_21_quad_eq"（库里叫 ch_quadratic）
+
+    要做的操作：
+        1. 用 kp_id 反查 knowledge_points：查不到的整行丢弃（抽题时这一行必然全变缺口）
+        2. 查得到的，chapter_id 一律按知识点归属重写——章节归属是数据事实，不该问 LLM
+
+    返回：
+        (纠正后的 QuotaPlan, 说明清单, {kp_id: 知识点名})
+        说明清单形如 ["kp_sqrt: 课程库中不存在该知识点，配额行已丢弃（规划师给出了不存在的 id）"]
+
+    为什么：
+        不修的话有两个后遗症：配额表「章节」列显示 ch_21_quad_eq 这种谁都不认识的编码；
+        摸底型的章节覆盖率把 covered 集合跟真实章节对不上，指标直接失真。
+        只在展示层翻译是治标——库里压根没有这个 id，翻译也翻不出来。
+    """
+    from app.services.naming import fetch_kp_chapter_map, fetch_kp_names
+
+    kp_ids = [it.kp_id for it in plan.items]
+    kp_chapter = fetch_kp_chapter_map(kp_ids)
+    kp_names = fetch_kp_names(kp_ids)
+
+    notes: list[str] = []
+    kept: list[QuotaItem] = []
+    dropped: set[str] = set()
+    fixed_chapters = 0
+
+    for it in plan.items:
+        # 知识点不存在 → 整行丢弃：留着只会在缺口清单里刷一条"池中仅 0 题"，误导组长
+        if it.kp_id not in kp_chapter:
+            dropped.add(it.kp_id)
+            continue
+
+        d = it.model_dump()
+        real_chapter = kp_chapter[it.kp_id] or "unknown"
+        if d["chapter_id"] != real_chapter:
+            d["chapter_id"] = real_chapter
+            fixed_chapters += 1
+
+        kept.append(QuotaItem(**d))
+
+    for kp_id in sorted(dropped):
+        notes.append(f"{kp_id}: 课程库中不存在该知识点，配额行已丢弃（规划师给出了不存在的 id）")
+
+    if fixed_chapters:
+        notes.append(f"{fixed_chapters} 行章节归属已按课程库纠正（规划师自造的 chapter_id 已替换）")
+
+    return (
+        QuotaPlan(exam_type=plan.exam_type, total_score=plan.total_score, items=kept),
+        notes,
+        kp_names,
+    )
+
+
 def _reviewer_summary(report: ReviewReport, exam_type: str, grade: str) -> str:
-    """把硬指标数值组织成给教研组长看的结论文字。
+    """把硬指标数值组织成 给教研组长看的结论文字。
 
     得到的数据：report=ReviewReport(passed=False, rounds_used=2, metrics={...},
                 problems=["难度分布偏出容差：hard ..."], summary="")；exam_type="monthly"；grade="初三"
@@ -272,6 +403,15 @@ def _reviewer_summary(report: ReviewReport, exam_type: str, grade: str) -> str:
             + json.dumps({"exam_type": exam_type, "grade": grade,
                           "passed": report.passed, "metrics": report.metrics,
                           "problems": report.problems}, ensure_ascii=False)
+            # ★ 三条口径约束：不写死的话模型会把 null 读成"数据缺失，需补齐后复核"，
+            #   组长看了以为要往题库补题——实际那只是"月考不查这一项"
+            + "\n\n写作口径（必须遵守）：\n"
+              "1. metrics 里值为 null 的指标 = 本次考试类型不检查这一项（如月考不查题型配比/章节覆盖），"
+              "一句话带过或直接不提，禁止写成「数据缺失」「需补齐数据后复核」。\n"
+              "2. problems 为空即全部达标，不要自己引申风险。\n"
+              "3. 需要下一步动作时，只允许推荐这两种："
+              "① 调整配额表后重新生成（重跑会重新规划并重抽）；② 题库该难度/题型不足时先补题库再生成。"
+              "不要编造系统里没有的功能（如「人工复核确认按钮」）。"
         )
         return get_llm(temperature=0.2).invoke(prompt).content.strip()
     except Exception:
@@ -304,23 +444,43 @@ def run_exam_generation(
     """
     from app.db.session import get_session_factory
     from app.models import Chapter, ExamPaper
+    from app.services.naming import fetch_chapter_catalog
     from app.tools.graph_tools import query_error_hotspots
 
     # t1 热点 + 前置知识链集合：
     hotspots = json.loads(query_error_hotspots.invoke({"grade": grade, "subject": subject, "top_n": 10}))  # .invoke({...}) 是 @tool 函数调用方式，返回 JSON 字符串
     hit_kp_ids = _expand_with_prerequisites({h["kp_id"] for h in hotspots})
 
-    # t2 命题规划LLM，出策略表（配额表）Planner； exam_type、total_score 再次赋传参值，防模型抄错
-    plan = _plan_quota(exam_type, grade, subject, hotspots)
+
+    # t2 课程目录白名单（章节 id + 下辖知识点 id）：
+    #    不给这份清单，规划师会自己拼 ch_21_quad_eq 这种库里不存在的 id，配额表章节列和覆盖率统计全跟着失真
+    catalog = fetch_chapter_catalog(subject, grade)
+
+
+    # t3 命题规划LLM，出策略表（配额表）Planner； exam_type、total_score 再次赋传参值，防模型抄错
+    plan = _plan_quota(exam_type, grade, subject, hotspots, catalog_text=_catalog_text(catalog))
     plan.exam_type = exam_type
     plan.total_score = total_score
 
-    # t3 抽题 + 四项硬指标校验硬校验，2轮校验不通过，返回缺口清单
+
+    # t4 用课程库纠正 id：不存在的知识点整行丢弃，chapter_id 一律按知识点归属重写
+    plan, id_notes, kp_names = _fix_plan_ids(plan)
+    if not plan.items:
+        # 全被丢弃（规划师几乎全在编 id）→ 用纯规则表兜底，并再纠正一次
+        plan = _fallback_plan(exam_type, hotspots)
+        plan.exam_type = exam_type
+        plan.total_score = total_score
+        plan, more_notes, kp_names = _fix_plan_ids(plan)
+        id_notes += ["规划表的 id 全部无效，已退回纯规则配额表"] + more_notes
+
+
+    # t5 抽题 + 四项硬指标校验硬校验，2轮校验不通过，返回缺口清单
     all_kp_ids = list({it.kp_id for it in plan.items})
     picked: list[dict] = []
     gaps: list[str] = []
     passed, metrics, problems = False, {}, ["尚未抽题"]
     rounds_used = 0
+
 
     # 抽2轮题目
     for round_no in range(1, MAX_ROUNDS + 1):
@@ -329,10 +489,16 @@ def run_exam_generation(
         candidates = fetch_candidates_by_kp(all_kp_ids)
 
         # 根据出题策略表/配额表，抽题
-        picked, gaps = select_questions_by_quota(
+        #   kp_label：缺口清单直接写"配方法"而不是"kp_peifang"——那是给组长看的
+        round_picked, round_gaps = select_questions_by_quota(
             quota_items=[it.model_dump() for it in plan.items],
             candidates_by_kp=candidates,
+            kp_label=kp_names,
         )
+
+        picked = round_picked
+        # 每一轮都把 id 纠正说明带上：第 2 轮重抽也一样适用
+        gaps = id_notes + round_gaps
 
         # 题目的章节覆盖率
         total_chapters = _count_chapters(grade, subject)
@@ -361,8 +527,11 @@ def run_exam_generation(
     session = get_session_factory()()
     try:
         paper = ExamPaper(
-            title=f"{grade}{subject} {'月考' if exam_type == 'monthly' else '期中' if exam_type == 'midterm' else '期末'}卷",
+            title=_paper_title(grade, subject, exam_type),
             grade=grade,
+            # subject 必须落：定稿推送要按"这个班这个学科的科任老师"过滤，
+            #   只存 grade 的话数学老师也会收到英语卷
+            subject=subject,
             exam_type=exam_type,
             quota_plan_json={
                 "plan": plan.model_dump(),

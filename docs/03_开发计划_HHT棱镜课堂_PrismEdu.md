@@ -226,7 +226,12 @@ uv run python -m app.crews.demo_analysis   # R-04 演示（用 gen_demo_data 合
 
 ### M5 FastAPI + 前端（10.20~10.21）
 
-**目标一句话**：全部端点 + SSE 流式 + interrupt resume 打通；Streamlit 四页（学生/老师/教研/管理后台）能走完整行为链。
+**目标一句话**：全部端点 + SSE 流式 + interrupt resume 打通；前端四页（学生/老师/教研/管理后台）能走完整行为链。
+
+> **变更（2026-10-26）**：M5-T4 当时用 Streamlit 交付的四个页面已**整体删除**
+> （`streamlit_app/`，823 行），前端统一由 `web_app/`（原生 ES Modules）承担，
+> 功能只增不减（考试模块、按题批改、出卷记录都是后面新增的）。
+> 下面 M5-T4 那一行保留为历史记录。
 
 | #     | 任务                                                                     | 分工  | 产出文件                                      |
 | ----- | ---------------------------------------------------------------------- | --- | ----------------------------------------- |
@@ -240,7 +245,7 @@ uv run python -m app.crews.demo_analysis   # R-04 演示（用 gen_demo_data 合
 
 ```bash
 uv run uvicorn app.main:app --port 8000          # 注意：不加 --reload（会话在 PG 但热重载仍断 SSE）
-uv run streamlit run streamlit_app/Home.py
+python3 web_app/serve.py                         # 前端（默认 5173；原 M5-T4 的 streamlit run 已废弃）
 ```
 
 预期验证（模拟）：

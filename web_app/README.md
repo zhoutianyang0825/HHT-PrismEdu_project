@@ -134,7 +134,7 @@ web_app/
 | 教研 · 年级学情 | `GET /api/research/grade/{grade}/mastery?subject=math` |
 | 教研 · 班级对比 | `GET /api/research/mastery/compare?grade&subject` |
 | 教研 · 智能出卷 | `POST /api/research/exam/generate`、`POST /api/research/exam/{id}/assign` |
-| 教研 · 考后分析 | `POST /api/research/paper/{id}/analyze`、`GET /api/research/questions/abnormal` |
+| 教研 · 考后分析 | `POST /api/research/paper/{id}/analyze`（报告里自带异常题清单与成因） |
 | 管理 · 账户导入 | `GET /api/admin/users/import-template`、`POST /api/admin/users/import` |
 | 管理 · 用户管理 | `GET/POST /api/admin/users`、`PUT /api/admin/users/{id}` |
 | 管理 · 授课关系 / 教研任命 / 班级 / 日志 | `/api/admin/teaching-assignments`、`/research-leads`、`/classes`、`/audit-logs` |

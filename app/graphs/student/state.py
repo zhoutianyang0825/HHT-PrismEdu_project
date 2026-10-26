@@ -19,6 +19,11 @@ class StudentAgentState(TypedDict):
     student_id: int
     question_id: int
 
+    # 作业上下文：学生从「我的作业」点进来时带作业 id，自由练习时为 None
+    # 作用：判分落库时决定 source_type —— 有作业 → "homework"(老师端按它查全班作答)；
+    #      没有 → "chat"(只给诊断测验供错题数据)
+    homework_id: int | None
+
     # ---- 多轮对话 ----
     messages: Annotated[list, add_messages]
 

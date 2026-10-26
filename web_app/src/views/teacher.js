@@ -3,6 +3,8 @@
  *   概览     GET /classes · GET /grade/pending
  *   待批改   POST /grade/{answer_id} → 客观题直判 / 主观题 pending_confirm
  *            POST /grade/{answer_id}/confirm  {action, score, comment}
+ *   考试批改 GET /exam/papers · GET /exam/{id}/grading
+ *            POST /exam/{id}/question/{qid}/pre-grade（按题批量 AI 批改）
  *   布置作业 POST /homework/create · GET /homework/{id}/submissions
  *   班级学情 GET /class/{id}/error-summary · GET /class/{id}/mastery
  *
@@ -10,7 +12,7 @@
  * 前端只负责把「不在你任教范围」的 403 原文透出来。
  * ========================================================================== */
 import {
-  http, toast, esc, md, mdInline, busy, pct, fixed, dateOf, clip,
+  API_BASE, http, toast, esc, md, mdInline, busy, pct, fixed, dateOf, clip,
   emptyState, errorBox,
 } from "../core.js";
 import { kpName } from "../kp-names.js";
@@ -30,6 +32,12 @@ const T = {
   homeworkList: null,   // 已布置作业列表（后端分页：时间倒序，每页 10 条）
   homeworkPage: 1,
   submissionHwId: null, // 从作业列表跳到「班级学情」时带过去的作业 id
+  // ---- 考试批改 M7 ----
+  gradeMode: "paper",   // paper=按试卷/题目分组批改；all=原作答流水
+  papers: null,         // 我教的班里已推送的试卷
+  paperId: null,        // 当前选中的卷
+  gradeData: null,      // 当前卷的分组批改数据
+  gradeBusy: {},        // answer_id -> true（AI 批改中）
 };
 
 const QTYPE = { choice: "选择题", fill: "填空题", subjective: "解答题" };
@@ -132,33 +140,492 @@ async function renderOverview(view, ctx) {
 }
 
 /* ---------------------------------------------------------------- 待批改 */
+/* 两种看法：
+ *   paper —— 按试卷 → 按题目分组：一题下面挂全班作答（考试批改主视图）
+ *   all   —— 原来的作答流水：谁、哪题、什么时候交（作业/对话也走这里）
+ *
+ * 为什么默认 paper：老师手上的活 90% 是考试卷的主观题，
+ * 一条题一个评分标准连着批 30 份，尺度才稳；流水视图适合零散作业。
+ */
 async function renderGrading(view, ctx) {
-  view.innerHTML = `<div class="page-head"><div class="eyebrow">自动批改 · T-02</div>
-    <h1 class="page-title">正在取待批改列表…</h1></div>
-    <div class="skeleton" style="height:160px"></div>`;
-
-  T.pending = (await http.get("/api/teacher/grade/pending")) || [];
-
+  const mode = T.gradeMode || "paper";
   const head = `
     <div class="page-head">
       <div class="eyebrow">自动批改 · T-02</div>
-      <h1 class="page-title">客观题即时生效，主观题你说了算</h1>
-      <p class="page-sub">客观题由规则直判；主观题走 LangGraph interrupt 挂起，AI 只给建议分与评语，采纳 / 改分 / 驳回之后才写成绩与 BKT。</p>
+      <h1 class="page-title">客观题对错判断即时生效，主观题你说了算</h1>
+      <p class="page-sub">客观题由规则直判；主观题 AI 只给建议分与评语，决定：采纳 / 改分 / 驳回之后才写成绩与 BKT掌握度。</p>
+    </div>
+    <div class="segmented" style="margin-bottom:18px">
+      <button data-grade-mode="paper" class="${mode === "paper" ? "active" : ""}">按试卷/题目批改</button>
+      <button data-grade-mode="all" class="${mode === "all" ? "active" : ""}">全部待批改</button>
     </div>`;
 
+  const wrap = (inner) => `${head}${inner}`;
+
+  if (mode === "all") await renderPendingList(view, ctx, wrap);
+  else await renderExamGrading(view, ctx, wrap);
+
+  // 绑定必须放在子视图渲染完之后：wrap 里的按钮是随 innerHTML 一起进 DOM 的，
+  // 提前 querySelectorAll 拿到的是空集合（这是最容易写错的一处）
+  view.querySelectorAll("[data-grade-mode]").forEach((b) => {
+    b.onclick = () => {
+      if (T.gradeMode === b.dataset.gradeMode) return;
+      T.gradeMode = b.dataset.gradeMode;
+      renderGrading(view, ctx);
+    };
+  });
+}
+
+/* ---- 模式二：原作答流水 ---- */
+async function renderPendingList(view, ctx, wrap) {
+  view.innerHTML = wrap(`<div class="skeleton" style="height:160px"></div>`);
+
+  T.pending = (await http.get("/api/teacher/grade/pending")) || [];
+
   if (!T.pending.length) {
-    view.innerHTML = `${head}<div class="card card-pad">${emptyState("没有待批改的作答", "学生提交后会自动出现在这里", "check")}</div>`;
+    view.innerHTML = wrap(`<div class="card card-pad">${emptyState("没有待批改的作答", "学生提交后会自动出现在这里", "check")}</div>`);
     return;
   }
 
-  view.innerHTML = `${head}
+  view.innerHTML = wrap(`
     <div class="muted" style="margin-bottom:14px;font-size:13px">
       共 <span id="pending-count">${T.pending.length}</span> 条 · 点击「AI 批改」开始
     </div>
-    <div id="grade-list" style="display:flex;flex-direction:column;gap:14px"></div>`;
+    <div id="grade-list" style="display:flex;flex-direction:column;gap:14px"></div>`);
 
   const list = view.querySelector("#grade-list");
   T.pending.forEach((row) => list.appendChild(gradeCard(row, view, ctx)));
+}
+
+/* ---- 模式一：按试卷 → 按题目分组（考试批改主视图） ---- */
+const EXAM_TYPE_CN = { monthly: "月考", midterm: "期中", final: "期末" };
+
+async function renderExamGrading(view, ctx, wrap) {
+  view.innerHTML = wrap(`<div class="skeleton" style="height:220px"></div>`);
+
+  if (T.papers === null) {
+    T.papers = (await http.get("/api/teacher/exam/papers")) || [];
+  }
+
+  if (!T.papers.length) {
+    // 没卷不代表没活干：作业和对话的作答仍在「全部待批改」里，
+    // 所以空态必须给一条出口，否则老师会以为批改页空了
+    view.innerHTML = wrap(`<div class="card card-pad">
+      ${emptyState("还没有推送给你的班级的试卷",
+                   "教研组长定稿后，卷子会按年级推送到你任教的班级", "file")}
+      <div class="form-actions" style="justify-content:center">
+        <button class="btn btn-secondary" id="to-all-grading">去看全部待批改（作业/对话）</button>
+      </div>
+    </div>`);
+    view.querySelector("#to-all-grading").onclick = () => {
+      T.gradeMode = "all";
+      renderGrading(view, ctx);
+    };
+    return;
+  }
+
+  const activeId = (T.paperId && T.papers.some((p) => p.paper_id === T.paperId))
+    ? T.paperId
+    : T.papers[0].paper_id;
+  T.paperId = activeId;
+
+  if (!T.gradeData || T.gradeData.paper_id !== activeId) {
+    view.innerHTML = wrap(`<div class="skeleton" style="height:260px"></div>`);
+    T.gradeData = await http.get(`/api/teacher/exam/${activeId}/grading`);
+  }
+
+  const d = T.gradeData;
+  const papers = T.papers;
+  const sum = d.summary || { subjective_total: 0, pending: 0, graded: 0 };
+
+  view.innerHTML = wrap(`
+    <div class="grade-layout">
+      <aside>
+        <div class="tiny" style="margin-bottom:8px">我任教的班里已推送的试卷</div>
+        ${papers.map((p) => `
+          <div class="paper-tab ${p.paper_id === activeId ? "active" : ""}" data-paper="${p.paper_id}">
+            <div class="grow" style="flex:1;min-width:0">
+              <div class="title" style="font-size:13.5px;font-weight:500">${esc(p.title)}</div>
+              <div class="tiny">${esc(EXAM_TYPE_CN[p.exam_type] || p.exam_type)} ·
+                已交 ${p.submitted_count}/${p.student_count} 人 · ${p.question_count} 题</div>
+            </div>
+            ${p.pending_count
+              ? `<span class="pill pill-orange">待批 ${p.pending_count}</span>`
+              : `<span class="pill pill-green">已批完</span>`}
+          </div>`).join("")}
+      </aside>
+
+      <div>
+        <div class="card card-pad" style="margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <div class="grow" style="flex:1;min-width:200px">
+              <div class="card-title">${esc(d.title)}</div>
+              <div class="card-sub">
+                ${esc(d.grade)} · 主观题 ${sum.subjective_total} 道 · 满分 ${fixed(d.full_score, 0)}
+              </div>
+            </div>
+            <span class="pill pill-orange">待批 ${sum.pending}</span>
+            <span class="pill pill-green">已批 ${sum.graded}</span>
+          </div>
+          <div class="tiny" style="margin-top:12px;line-height:1.8">
+            按题目分组：一题一组，组内是本班全体学生对该题的作答。
+            同一道题连着批，评分尺度最稳；「AI 批改本题全部」一次给出全组建议分，你再逐条采纳/改分/驳回。
+          </div>
+        </div>
+
+        ${(d.groups || []).length
+          ? d.groups.map((g) => gradeGroupHTML(g)).join("")
+          : `<div class="card card-pad">${emptyState("这份卷没有主观题", "全客观题的卷子交卷即判完，不需要人工批改", "check")}</div>`}
+      </div>
+    </div>`);
+
+  view.querySelectorAll("[data-paper]").forEach((el) => {
+    el.onclick = () => {
+      T.paperId = Number(el.dataset.paper);
+      T.gradeData = null;
+      renderGrading(view, ctx);
+    };
+  });
+
+  view.querySelectorAll("[data-pregrade]").forEach((btn) => {
+    btn.onclick = () => pregradeQuestion(btn, view, ctx);
+  });
+
+  view.querySelectorAll("[data-aigrade]").forEach((btn) => {
+    btn.onclick = () => pregradeOne(btn, view, ctx);
+  });
+
+  // 自主批改：不跑 AI，老师直接判 正确/部分正确/错误
+  view.querySelectorAll("[data-manual]").forEach((btn) => {
+    btn.onclick = () => {
+      const aid = Number(btn.dataset.manual);
+      const container = view.querySelector(`[data-answer="${aid}"]`);
+      const box = container?.querySelector("[data-result]");
+      if (!box) return;
+      box.innerHTML = manualPanelHTML({ answer_id: aid, full_score: Number(btn.dataset.full) });
+      bindManualGrade(box, { answer_id: aid, full_score: Number(btn.dataset.full) },
+                      view, ctx, container);
+    };
+  });
+}
+
+function gradeGroupHTML(g) {
+  const pending = g.answers.filter((a) => a.is_correct === null).length;
+  const graded = g.answers.length - pending;
+
+  return `<section class="grade-group" data-group="${g.question_id}">
+    <div class="grade-group-hd">
+      <span class="pill pill-blue">第 ${g.seq} 题</span>
+      <span class="pill">${fixed(g.score, 1)} 分</span>
+      <span data-group-count>
+        <span class="pill pill-orange">待批 ${pending}</span>
+        <span class="pill pill-green">已批 ${graded}</span>
+      </span>
+      <div class="spacer" style="flex:1"></div>
+      ${pending
+        ? `<button class="btn btn-sm btn-primary" data-pregrade="${g.question_id}">AI 批改本题全部（${pending}）</button>`
+        : `<span class="pill pill-green">本题已批完</span>`}
+    </div>
+    <div class="grade-group-bd">
+      <div style="padding:12px 0 4px">
+        <div class="q-text">${md(g.content)}</div>
+        <details style="margin-top:10px">
+          <summary class="tiny" style="cursor:pointer">查看标准答案与解析</summary>
+          <div style="margin-top:8px;font-size:13px;line-height:1.8;color:var(--ink-2)">
+            <div><b>标准答案：</b>${esc(g.answer || "—")}</div>
+            ${g.analysis ? `<div style="margin-top:6px"><b>解析：</b>${md(g.analysis)}</div>` : ""}
+          </div>
+        </details>
+      </div>
+      ${g.answers.length
+        ? g.answers.map((a) => gradeAnswerHTML(a, g.score)).join("")
+        : `<div class="tiny" style="padding:14px 0">本题还没有学生提交作答。</div>`}
+    </div>
+  </section>`;
+}
+
+function gradeAnswerHTML(a, fullScore) {
+  const pending = a.is_correct === null;
+  const full = Number(fullScore ?? a.full_score ?? 100);
+  const statePill = pending
+    ? `<span class="pill pill-orange" data-pending="1" data-state>待批改</span>`
+    : `<span class="pill ${a.is_correct ? "pill-green" : "pill-red"}" data-pending="0" data-state>
+         ${a.is_correct ? "答对" : "答错"} · ${fixed(a.score ?? 0, 1)} 分</span>`;
+
+  return `<div class="grade-answer" data-answer="${a.answer_id}">
+    <div class="who">
+      <span class="name">${esc(a.student)}</span>
+      <span class="tiny">${esc(a.class_name || "")} · 交卷 ${dateOf(a.submitted_at)}</span>
+      ${statePill}
+      <span class="spacer" style="flex:1"></span>
+      ${pending ? `
+        <button class="btn btn-sm btn-secondary" data-manual="${a.answer_id}" data-full="${full}">自主批改</button>
+        <button class="btn btn-sm btn-secondary" data-aigrade="${a.answer_id}">AI 批改</button>` : ""}
+    </div>
+    <div class="body-text ${a.content ? "" : "empty"}">${a.content ? esc(a.content) : "（未填写文字，见下方手写图）"}</div>
+    ${(a.attachments || []).length ? `<div class="imgs">
+      ${a.attachments.map((u) => `<a href="${esc(API_BASE + u)}" target="_blank" rel="noopener">
+        <img src="${esc(API_BASE + u)}" alt="手写解题图片" loading="lazy" /></a>`).join("")}
+    </div>` : ""}
+    <div data-result></div>
+  </div>`;
+}
+
+/* 老师自主批改面板：正确 / 部分正确 / 错误；选部分正确才显示给分框 */
+function manualPanelHTML(item) {
+  const full = Number(item.full_score ?? item.fullScore ?? 100);
+  return `<div class="manual-grade">
+    <div class="mg-hd">
+      <span class="pill pill-dark">自主批改</span>
+      <span class="tiny">本题满分 ${fixed(full, 1)} 分 · 判完直接生效并回写掌握度</span>
+    </div>
+    <div class="segmented" data-verdict>
+      <button data-val="correct">正确（${fixed(full, 1)} 分）</button>
+      <button data-val="partial">部分正确</button>
+      <button data-val="wrong">错误（0 分）</button>
+    </div>
+    <div class="mg-score" data-score-box hidden>
+      <span class="tiny">给分</span>
+      <input class="input" type="number" min="0" max="${full}" step="0.5"
+        data-score placeholder="0 ~ ${fixed(full, 1)}" />
+      <span class="tiny">/ ${fixed(full, 1)} 分</span>
+    </div>
+    <div class="mg-actions">
+      <input class="input" data-comment maxlength="200" placeholder="评语（可选，写进批改记录）" />
+      <button class="btn btn-sm btn-primary" data-mg-submit>确认给分</button>
+      <button class="btn btn-sm btn-ghost" data-mg-cancel>取消</button>
+    </div>
+  </div>`;
+}
+
+function bindManualGrade(box, item, view, ctx, container) {
+  const full = Number(item.full_score ?? item.fullScore ?? 100);
+  const seg = box.querySelector("[data-verdict]");
+  const scoreBox = box.querySelector("[data-score-box]");
+  const scoreInput = box.querySelector("[data-score]");
+  let verdict = null;
+
+  seg.querySelectorAll("button").forEach((btn) => {
+    btn.onclick = () => {
+      verdict = btn.dataset.val;
+      seg.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === btn));
+      scoreBox.hidden = verdict !== "partial";
+      // 再压一层 inline display：以后若有人给 .mg-score 加 display 声明，
+      // [hidden] 又会被盖掉，给分框会莫名其妙地弹出来
+      scoreBox.style.display = verdict === "partial" ? "" : "none";
+      // 预填一半分：老师多数是"改个数"，不是从 0 开始想
+      if (verdict === "partial" && !scoreInput.value) {
+        scoreInput.value = String(Math.round(full / 2 * 2) / 2);
+      }
+    };
+  });
+
+  box.querySelector("[data-mg-cancel]").onclick = () => { box.innerHTML = ""; };
+
+  const submit = box.querySelector("[data-mg-submit]");
+  submit.onclick = async () => {
+    if (!verdict) { toast("先选：正确 / 部分正确 / 错误", "err"); return; }
+
+    let score = null;
+    if (verdict === "partial") {
+      score = Number(scoreInput.value);
+      if (!Number.isFinite(score) || score <= 0 || score >= full) {
+        toast(`部分正确的分数要在 0 ~ ${fixed(full, 1)} 之间（全对选「正确」、全错选「错误」）`, "err");
+        return;
+      }
+    }
+
+    const comment = (box.querySelector("[data-comment]").value || "").trim();
+    const restore = busy(submit, "落库中…");
+    try {
+      const out = await http.post(`/api/teacher/grade/${item.answer_id}/manual`, {
+        judgement: verdict,
+        score: verdict === "partial" ? score : null,
+        comment: comment || null,
+      });
+      box.innerHTML = finalHTML(out);
+      markAnswerFinal(container, out, item.answer_id);
+      toast(`已给 ${fixed(out.final_score, 1)} 分，掌握度同步更新`, "ok");
+      restore();
+    } catch (err) {
+      restore();
+      toast(err.detail || "给分失败", "err");
+    }
+  };
+}
+
+/* 单条 AI 批改：客观题终局、主观题挂起给建议 */
+async function pregradeOne(btn, view, ctx) {
+  const aid = Number(btn.dataset.aigrade);
+  const container = view.querySelector(`[data-answer="${aid}"]`);
+  const box = container?.querySelector("[data-result]");
+  const restore = busy(btn, "批改中…");
+  try {
+    const out = await http.post(`/api/teacher/grade/${aid}`);
+    if (out.status === "pending_confirm") {
+      box.innerHTML = suggestHTML(out.suggestion, aid);
+      bindExamSuggest(box, { answer_id: aid }, view, ctx, container);
+    } else {
+      box.innerHTML = finalHTML(out);
+      markAnswerFinal(container, out, aid);
+    }
+    restore();
+  } catch (err) {
+    restore();
+    if (box) box.innerHTML = errorBox(err.detail || "批改失败");
+  }
+}
+
+/* 按题批量：一条评分标准跑全组，失败不整体回滚 */
+async function pregradeQuestion(btn, view, ctx) {
+  const qid = Number(btn.dataset.pregrade);
+  const groupEl = view.querySelector(`[data-group="${qid}"]`);
+  const restore = busy(btn, "整组批改中…");
+  try {
+    const out = await http.post(
+      `/api/teacher/exam/${T.paperId}/question/${qid}/pre-grade`);
+
+    const items = out.items || [];
+
+    // 一条都没跑：库里这题已经没有 is_correct IS NULL 的作答了，
+    // 说明页面上的"待批 N"是旧快照（这条刚在另一个页签/另一处批过）。
+    // 不清缓存重拉，老师会对着一个永远批不动的数字反复点。
+    if (!items.length) {
+      T.gradeData = null;
+      restore();
+      toast("这道题已经没有待批的作答了（可能刚批过），已刷新", "");
+      renderGrading(view, ctx);
+      return;
+    }
+
+    items.forEach((it) => {
+      const container = view.querySelector(`[data-answer="${it.answer_id}"]`);
+      if (!container) return;
+      const box = container.querySelector("[data-result]");
+
+      if (it.status === "pending_confirm") {
+        box.innerHTML = suggestHTML(it.suggestion, it.answer_id);
+        bindExamSuggest(box, { answer_id: it.answer_id }, view, ctx, container);
+      } else if (it.status === "error") {
+        box.innerHTML = errorBox(it.message || "这条批改失败");
+      } else {
+        box.innerHTML = finalHTML(it);
+        markAnswerFinal(container, it, it.answer_id);
+      }
+    });
+
+    // 分组数据已被就地改过（终局的条数变了），缓存作废，下次切模式重拉
+    T.gradeData = null;
+
+    const asked = items.filter((it) => it.status === "pending_confirm").length;
+    const settled = items.length - asked - out.failed;
+    let msg = `AI 处理 ${out.graded} 条`;
+    if (asked) msg += `：${asked} 条待你裁决`;
+    if (settled) msg += `${asked ? "，" : "："}${settled} 条已直接判定`;
+    if (out.failed) msg += `，${out.failed} 条失败（可单独重试）`;
+
+    toast(msg, out.failed ? "" : "ok");
+    if (groupEl) refreshGroupCount(groupEl);
+    restore();
+  } catch (err) {
+    restore();
+    toast(err.detail || "批量批改失败", "err");
+  }
+}
+
+/* 建议卡的裁决绑定：确认后把这条作答就地改成终局态，并刷新本组待批数 */
+function bindExamSuggest(box, item, view, ctx, container) {
+  const aid = item.answer_id;
+  const decision = T.decisions[aid] || (T.decisions[aid] = { action: "confirm", score: null });
+  // 旧内存里可能残留 reject（入口已移除），兜回 confirm，否则确认时会发后端已不展示的动作
+  if (decision.action === "reject") decision.action = "confirm";
+
+  box.querySelectorAll("[data-act] button").forEach((btn) => {
+    btn.onclick = () => {
+      decision.action = btn.dataset.val;
+      box.querySelectorAll("[data-act] button").forEach((b) => b.classList.toggle("active", b === btn));
+      const scoreInput = box.querySelector("[data-score]");
+      if (scoreInput) scoreInput.style.display = decision.action === "edit" ? "" : "none";
+    };
+  });
+
+  const scoreInput = box.querySelector("[data-score]");
+  if (scoreInput) scoreInput.oninput = () => { decision.score = Number(scoreInput.value); };
+
+  const confirmBtn = box.querySelector("[data-confirm]");
+  confirmBtn.onclick = async () => {
+    if (decision.action === "edit" && !Number.isFinite(decision.score)) {
+      toast("改分需要填写最终分数", "err");
+      return;
+    }
+    const restore = busy(confirmBtn, "落库中…");
+    try {
+      const out = await http.post(`/api/teacher/grade/${aid}/confirm`, {
+        action: decision.action,
+        score: decision.action === "edit" ? decision.score : null,
+      });
+      box.innerHTML = finalHTML(out);
+      markAnswerFinal(container, out, aid);
+      toast("已生效，掌握度与考试总分同步更新", "ok");
+      restore();
+    } catch (err) {
+      restore();
+      toast(err.detail || "确认失败", "err");
+    }
+  };
+}
+
+/* 把一条作答的状态药丸换成终局，并刷新所在组的待批/已批计数 */
+function markAnswerFinal(container, out, answerId) {
+  // 任何一条批完，分组快照就过期了：不清掉，切回"按试卷批改"会拿旧数据重绘，
+  // 组头仍显示"待批 1"，老师再点"AI 批改本题全部"就是 0 份。
+  T.gradeData = null;
+
+  const pill = container?.querySelector("[data-state]");
+  if (pill) {
+    const rejected = out.status === "rejected";
+    pill.className = `pill ${rejected ? "pill-orange" : out.is_correct ? "pill-green" : "pill-red"}`;
+    pill.dataset.pending = "0";
+    pill.textContent = rejected
+      ? "已驳回"
+      : `${out.is_correct ? "答对" : "答错"} · ${fixed(out.final_score ?? out.score, 1)} 分`;
+  }
+  const btn = container?.querySelector("[data-aigrade]");
+  if (btn) btn.remove();
+  // 自主批改入口也要收起：已批过的作答再点人工给分会 409
+  container?.querySelector("[data-manual]")?.remove();
+  container?.querySelector("[data-manual-row]")?.remove();
+
+  const groupEl = container?.closest(".grade-group");
+  if (groupEl) refreshGroupCount(groupEl);
+
+  // 每批完一条，侧栏那份卷的"待批 N"也要跟着减一
+  const paper = (T.papers || []).find((p) => p.paper_id === T.paperId);
+  if (paper && paper.pending_count > 0) paper.pending_count -= 1;
+  const layout = container?.closest(".grade-layout");
+  const tab = layout?.querySelector(`.paper-tab[data-paper="${T.paperId}"] .pill`);
+  if (tab && paper) {
+    tab.textContent = paper.pending_count ? `待批 ${paper.pending_count}` : "已批完";
+    tab.className = `pill ${paper.pending_count ? "pill-orange" : "pill-green"}`;
+  }
+}
+
+function refreshGroupCount(groupEl) {
+  const total = groupEl.querySelectorAll("[data-answer]").length;
+  const pending = groupEl.querySelectorAll('[data-pending="1"]').length;
+  const box = groupEl.querySelector("[data-group-count]");
+  if (box) {
+    box.innerHTML = `<span class="pill pill-orange">待批 ${pending}</span>
+      <span class="pill pill-green">已批 ${total - pending}</span>`;
+  }
+  const pre = groupEl.querySelector("[data-pregrade]");
+  if (pre) {
+    if (pending === 0) {
+      pre.outerHTML = `<span class="pill pill-green">本题已批完</span>`;
+    } else {
+      pre.textContent = `AI 批改本题全部作答（${pending}）`;
+    }
+  }
 }
 
 function gradeCard(row, view, ctx) {
@@ -172,7 +639,10 @@ function gradeCard(row, view, ctx) {
       <span class="title" style="font-size:14px;font-weight:500">${esc(row.student)}</span>
       <span class="tiny">作答 #${row.answer_id} · ${dateOf(row.submitted_at)}</span>
       <span class="spacer" style="flex:1"></span>
-      ${state ? "" : `<button class="btn btn-sm btn-primary" data-grade="${row.answer_id}">AI 批改</button>`}
+      ${state ? "" : `
+        <button class="btn btn-sm btn-secondary" data-manual-row="${row.answer_id}"
+          data-full="${Number(row.full_score ?? 100)}">自主批改</button>
+        <button class="btn btn-sm btn-primary" data-grade="${row.answer_id}">AI 批改</button>`}
     </div>
 
     <div style="margin-top:14px;padding:14px 16px;background:#fafafb;border-radius:12px">
@@ -185,6 +655,16 @@ function gradeCard(row, view, ctx) {
     <div data-result style="margin-top:14px"></div>`;
 
   const resultBox = card.querySelector("[data-result]");
+
+  // 自主批改（流水视图）：不经过 AI，直接三选一给分
+  const manualRow = card.querySelector("[data-manual-row]");
+  if (manualRow) {
+    manualRow.onclick = () => {
+      const item = { answer_id: row.answer_id, full_score: Number(manualRow.dataset.full) };
+      resultBox.innerHTML = manualPanelHTML(item);
+      bindManualGrade(resultBox, item, view, ctx, card);
+    };
+  }
 
   const trigger = card.querySelector("[data-grade]");
   if (trigger) {
@@ -235,8 +715,8 @@ function suggestHTML(sug, answerId) {
 
     <div class="decision">
       <div class="segmented" data-act>
-        ${[["confirm", "采纳"], ["edit", "改分"], ["reject", "驳回"]].map(([k, label]) => `
-          <button data-val="${k}" class="${decision.action === k ? "active" : ""}">${label}</button>`).join("")}
+        ${[["confirm", "采纳"], ["edit", "改分"]].map(([k, label]) => `
+          <button data-val="${k}" class="${(decision.action === "reject" ? "confirm" : decision.action) === k ? "active" : ""}">${label}</button>`).join("")}
       </div>
       <input class="input" data-score type="number" step="0.5" min="0"
         max="${sug.full_score ?? 100}" value="${decision.score ?? sug.ai_score ?? 0}"
@@ -245,13 +725,16 @@ function suggestHTML(sug, answerId) {
       <span class="spacer" style="flex:1"></span>
       <button class="btn btn-primary" data-confirm>确认生效并回写 BKT</button>
     </div>
-    <div class="tiny" style="margin-top:10px">驳回表示该次作答不计入成绩，掌握度不更新。</div>
+    <div class="tiny" style="margin-top:10px">
+      只有「采纳 / 改分」两条路：认为 AI 判错就用这条作答上的「自主批改」自己给分（正确 / 部分正确 / 错误）。
+    </div>
   </div>`;
 }
 
 function bindSuggest(box, row, view, ctx, card) {
   const aid = row.answer_id;
   const decision = T.decisions[aid] || (T.decisions[aid] = { action: "confirm", score: null });
+  if (decision.action === "reject") decision.action = "confirm";
 
   box.querySelectorAll("[data-act] button").forEach((btn) => {
     btn.onclick = () => {
@@ -607,12 +1090,18 @@ function submissionsHTML(data) {
   const page = (data && data.page) || 1;
   const pages = Math.max(1, Math.ceil(total / size));
   const hw = data && data.homework;
+  const sum = (data && data.summary) || null;
   if (!total) return `<div class="tiny">暂无作答记录</div>`;
   return `
     <div class="tiny" style="margin-bottom:8px">${hw ? `作业 #${hw.id} ${esc(hw.title)} · ` : ""}共 ${total} 条作答</div>
+    ${sum ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="pill">共 ${sum.question_total} 题</span>
+      <span class="pill pill-green">做齐 ${sum.completed} 人</span>
+      <span class="pill pill-orange">只做一部分 ${sum.partial} 人</span>
+    </div>` : ""}
     <div class="scroll-list" style="max-height:420px">
       <div class="table-wrap"><table class="table">
-        <thead><tr><th>学生</th><th>作答</th><th>得分</th><th>判定</th></tr></thead>
+        <thead><tr><th>学生</th><th>作答</th><th class="num">得分</th><th>判定</th></tr></thead>
         <tbody>
           ${items.map((r) => `
             <tr>

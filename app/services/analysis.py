@@ -74,8 +74,10 @@ def compute_item_metrics(df) -> list[dict]:
 
     for q_id, grp in df.groupby("q_id"):
         # 该题满分：取第一行的 full_score。
-        #   假设"同一题所有行满分相同"（R-08 均匀分值成立）；
-        #   将来若改成按题设分，这里要确保同一题的各行 full_score 一致，否则指标会飘。
+        #   ⚠ 这个值由调用方（paper_analyze）填好：来自 exam_paper_questions.score，
+        #     也就是定稿时固化下来的真实分值（选3/填4/解8 摊出来的），不是 100 均摊。
+        #   必须保证"同一题所有行 full_score 相同"，否则这里取第一行会飘 ——
+        #   API 层是按 q_id 映射填的，天然一致；将来若改成"按人设不同满分"，这里要改成 max/固定值。
         full = grp["full_score"].iloc[0]
         # P = 该题平均得分 / 满分。示例：均分 0.98 / 满分 4.0 = 0.245 → 过难
         p = grp["score"].mean() / full
@@ -101,9 +103,10 @@ def compute_item_metrics(df) -> list[dict]:
 
         results.append({
             "q_id": int(q_id),                    # numpy int → Python int，JSON 才序列化得动
+            "full_score": round(float(full), 2),  # 该题卷面满分（真实分值），前端可显示"均分 / 满分"
             "P": round(float(p), 3),              # 保留 3 位：0.245 够看出过难，太多位是噪声
             "D": round(float(d), 3),
-            "score_rate": round(float(grp["score"].mean() / full), 3),   # 均匀分值下与 P 相同
+            "score_rate": round(float(grp["score"].mean() / full), 3),   # 与 P 同算法，留作并读
             "is_abnormal": bool(issues),          # 有任一标签即异常，供 pick_abnormal 直接筛
             "issues": issues,
         })

@@ -174,3 +174,48 @@ def test_no_bare_with_structured_output_in_project():
                 offenders.append(f"{py.relative_to(root)}:{node.lineno}")
 
     assert not offenders, "发现裸调 with_structured_output（会静默降级）：\n" + "\n".join(offenders)
+
+
+# =====================================================================
+# 嵌套 schema 展开（2026-10-26 补题库时踩到）
+# =====================================================================
+def test_nested_schema_is_expanded_in_fallback_prompt():
+    """★ 兜底路径的 prompt 必须展开嵌套模型的内层字段。
+
+    踩坑现场：给知识点批量出题时定义了
+        class GeneratedBatch(BaseModel): questions: list[GeneratedQuestion]
+    兜底 prompt 原来只列顶层字段（questions），模型根本看不到
+    GeneratedQuestion 里有什么字段，于是自己编了个 question 代替 content，
+    pydantic 校验直接失败，一整批题全丢。
+    """
+    from pydantic import BaseModel, Field
+
+    from app.core.structured import _model_json_sample
+
+    class _Inner(BaseModel):
+        content: str = Field(description="题干")
+        answer: str = Field(description="答案")
+
+    class _Outer(BaseModel):
+        questions: list[_Inner] = Field(description="题目列表")
+
+    text = _model_json_sample(_Outer)
+
+    assert '"questions": [' in text, "列表字段没被展开成数组"
+    assert '"content"' in text and '"answer"' in text, "内层字段名必须出现在提示里"
+    assert "题干" in text, "内层字段的说明（description）也要带出来"
+
+
+def test_flat_schema_prompt_unchanged():
+    """扁平 schema（意图分类/批改/归因）的提示格式不能被改坏。"""
+    from pydantic import BaseModel, Field
+
+    from app.core.structured import _model_json_sample
+
+    class _Flat(BaseModel):
+        intent: str = Field(description="五类之一")
+
+    text = _model_json_sample(_Flat)
+
+    assert '"intent"' in text
+    assert "五类之一" in text

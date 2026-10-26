@@ -455,6 +455,23 @@ button { font: inherit; color: inherit; }
 .q-item.active { background: var(--blue-soft); }
 .q-item .idx { font-size: 11px; color: var(--ink-3); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .q-item .txt { font-size: 12.5px; color: var(--ink); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* 作答状态标记：✓ 对（绿）/ ✗ 错（红）/ … 待批改（橙）/ 空 = 还没做 */
+.q-item .q-mark {
+  margin-left: auto; flex: none; width: 15px; text-align: center;
+  font-size: 12px; line-height: 1.5; color: var(--ink-3);
+}
+.q-item .q-mark.ok { color: #1a7f37; font-weight: 700; }
+.q-item .q-mark.bad { color: var(--red); font-weight: 700; }
+.q-item .q-mark.wait { color: #b26a00; font-weight: 700; }
+
+/* 作业全部答完的收尾条：居中、浅色，不抢对话主线 */
+.chat-done {
+  align-self: center; display: flex; align-items: center; gap: 7px;
+  max-width: 90%; padding: 9px 14px; border-radius: 999px;
+  background: rgba(26, 127, 55, 0.08); color: #1a7f37;
+  font-size: 12.5px; line-height: 1.5; text-align: center;
+  animation: rise 0.28s var(--ease);
+}
 
 .chat-card { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .chat-hd { padding: 18px 24px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; }
@@ -722,3 +739,182 @@ button { font: inherit; color: inherit; }
   .topbar { padding: 0 16px; }
   .brand-role { display: none; }
 }
+
+/* ============================================================================
+   考试模块（学生端整卷作答 / 老师端按题批改）
+   ========================================================================== */
+/* 顶部固定操作条：整卷 20~25 题要滚很久，交卷按钮不能跟着滚出屏幕 */
+.exam-bar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 18px; margin-bottom: 16px;
+  background: rgba(255, 255, 255, 0.88); backdrop-filter: saturate(180%) blur(18px);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+.exam-bar .grow { flex: 1; }
+.exam-bar-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.exam-bar .tiny { margin-top: 2px; }
+.exam-score { font-size: 24px; font-weight: 600; letter-spacing: -0.03em; }
+.exam-score small { font-size: 12px; font-weight: 400; color: var(--ink-3); margin-left: 2px; }
+
+/* 左答题卡 + 右题目流 */
+.exam-shell { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 18px; align-items: start; }
+.exam-nav {
+  position: sticky; top: 84px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: #fff; padding: 14px; box-shadow: var(--shadow-xs);
+}
+.exam-nav-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.exam-dot {
+  height: 32px; border-radius: 8px; border: 1px solid var(--line-2);
+  background: #fff; color: var(--ink-2); font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s var(--ease);
+}
+.exam-dot:hover { border-color: rgba(0, 113, 227, 0.45); color: var(--blue); }
+.exam-dot.filled { background: var(--blue-soft); border-color: rgba(0, 113, 227, 0.35); color: #0059b3; }
+.exam-dot.ok { background: var(--green-soft); border-color: rgba(29, 138, 77, 0.35); color: var(--green); }
+.exam-dot.bad { background: var(--red-soft); border-color: rgba(215, 0, 21, 0.3); color: var(--red); }
+.exam-body { min-width: 0; }
+
+.exam-q .q-text { font-size: 15px; }
+.exam-q .q-text p { margin: 0 0 6px; }
+/* 填空题：给一条明显的作答下划线，而不是普通输入框 */
+.exam-fill { margin-top: 14px; }
+.exam-input {
+  width: 100%; height: 46px; font-size: 15px;
+  border: 1px solid var(--line-2); border-radius: 10px; background: #fcfcfd;
+  padding: 0 14px;
+}
+.exam-input:focus { background: #fff; border-color: rgba(0, 113, 227, 0.55); outline: none; }
+.exam-textarea {
+  width: 100%; margin-top: 14px; min-height: 132px; padding: 13px 14px;
+  font-family: inherit; font-size: 14.5px; line-height: 1.75; resize: vertical;
+  border: 1px solid var(--line-2); border-radius: 10px; background: #fcfcfd;
+}
+.exam-textarea:focus { background: #fff; border-color: rgba(0, 113, 227, 0.55); outline: none; }
+.exam-upload { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.exam-thumbs { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.exam-thumb {
+  position: relative; display: block; width: 108px; height: 108px;
+  border-radius: 10px; overflow: hidden; border: 1px solid var(--line-2); background: var(--bg-soft);
+}
+.exam-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.exam-thumb-del {
+  position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
+  border-radius: 50%; border: 0; background: rgba(0, 0, 0, 0.55); color: #fff;
+  font-size: 11px; line-height: 1; cursor: pointer; display: grid; place-items: center;
+}
+.exam-thumb-del:hover { background: var(--red); }
+
+.exam-row { align-items: center; }
+
+@media (max-width: 900px) {
+  .exam-shell { grid-template-columns: 1fr; }
+  .exam-nav { position: static; }
+  .exam-nav-grid { grid-template-columns: repeat(8, 1fr); }
+  .exam-bar { padding: 10px 14px; gap: 10px; }
+}
+
+/* ============================================================================
+   老师端 · 按题分组批改
+   ========================================================================== */
+.grade-group { border: 1px solid var(--line); border-radius: var(--radius); background: #fff; overflow: hidden; }
+.grade-group + .grade-group { margin-top: 14px; }
+.grade-group-hd {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 16px 20px; background: linear-gradient(180deg, #fafafb, #fff);
+  border-bottom: 1px solid var(--line);
+}
+.grade-group-hd .q-text { font-size: 14px; line-height: 1.7; font-weight: 500; }
+.grade-group-bd { padding: 6px 20px 14px; }
+.grade-answer {
+  padding: 14px 0; border-bottom: 1px solid var(--line);
+}
+.grade-answer:last-child { border-bottom: 0; }
+.grade-answer .who { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.grade-answer .who .name { font-size: 13.5px; font-weight: 500; }
+.grade-answer .body-text {
+  font-size: 14px; line-height: 1.8; white-space: pre-wrap;
+  background: var(--bg-soft); border-radius: 10px; padding: 12px 14px;
+}
+.grade-answer .body-text.empty { color: var(--ink-3); font-style: normal; }
+.grade-answer .imgs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.grade-answer .imgs a { width: 92px; height: 92px; border-radius: 9px; overflow: hidden; border: 1px solid var(--line-2); }
+.grade-answer .imgs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.paper-tab {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 13px 16px; border: 1px solid var(--line); border-radius: 12px;
+  background: #fff; cursor: pointer; transition: all 0.16s var(--ease);
+}
+.paper-tab + .paper-tab { margin-top: 8px; }
+.paper-tab:hover { border-color: rgba(0, 113, 227, 0.35); }
+.paper-tab.active { border-color: var(--blue); background: var(--blue-soft); box-shadow: 0 0 0 1px var(--blue) inset; }
+
+/* 左卷列表 + 右题目分组 */
+.grade-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 900px) {
+  .grade-layout { grid-template-columns: 1fr; }
+}
+
+/* ============================================================================
+   老师端 · 自主批改面板（正确 / 部分正确 / 错误）
+   ========================================================================== */
+.manual-grade {
+  margin-top: 12px; padding: 14px 16px;
+  border: 1px solid var(--line-2); border-radius: 12px;
+  background: linear-gradient(180deg, #fafafb, #ffffff);
+}
+.manual-grade .mg-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.manual-grade .segmented { margin-bottom: 0; }
+.manual-grade .mg-score {
+  display: flex; align-items: center; gap: 10px; margin-top: 12px;
+}
+/* [hidden] 的 display:none 是浏览器默认样式，优先级低于上面这条 .mg-score{display:flex}，
+ * 不显式补一句，选「正确/错误」时给分框根本藏不住 */
+.manual-grade .mg-score[hidden] { display: none; }
+.manual-grade .mg-score .input { width: 110px; height: 38px; }
+.manual-grade .mg-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+}
+.manual-grade .mg-actions .input { flex: 1; min-width: 160px; height: 38px; }
+
+/* ============================================================================
+   教研端 · 出卷记录（列表 + 题目详情弹窗）
+   ========================================================================== */
+/* 整行可点，必须给 hover 提示，否则组长不知道这行能点 */
+.paper-table tbody tr { cursor: pointer; transition: background 0.14s var(--ease); }
+.paper-table tbody tr:hover { background: var(--bg-soft); }
+.paper-table td { vertical-align: top; }
+.paper-table .chip { font-size: 12px; padding: 2px 9px; }
+
+/* 卷号：同年级多次出同类型卷时，标题会撞成同一个名字（初三月考卷 × N），
+   卷号是肉眼可核对的硬标识。压成淡色小字，别抢标题的视觉重心。 */
+.paper-id {
+  font-size: 12px; font-weight: 500; color: var(--ink-3);
+  margin-right: 6px; font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* 题目详情要横向铺开：默认 560px 宽会把题干 + 选项挤成一列 */
+.modal.modal-wide { width: min(940px, 100%); }
+
+.paper-q summary {
+  cursor: pointer; font-size: 13.5px; line-height: 1.7; color: var(--ink);
+  list-style: none;
+}
+.paper-q summary::-webkit-details-marker { display: none; }
+.paper-q summary::before {
+  content: "▸"; display: inline-block; margin-right: 6px; color: var(--ink-3);
+  transition: transform 0.15s var(--ease);
+}
+.paper-q[open] summary::before { transform: rotate(90deg); }
+.paper-q[open] summary { color: var(--ink-3); }
+.paper-q-body {
+  margin-top: 10px; padding: 12px 14px; border-radius: 10px;
+  background: var(--bg-soft); font-size: 13.5px; line-height: 1.85;
+}
+.paper-opts { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; color: var(--ink-2); }
+.paper-qa { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line-2); }
+.paper-qa .md { margin-top: 4px; }

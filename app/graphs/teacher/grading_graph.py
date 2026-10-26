@@ -47,6 +47,7 @@ from app.core.textfmt import OUTPUT_FORMAT_RULES, clean_llm_text
 from app.db.session import get_session_factory
 from app.models import (
     ErrorLog,
+    ExamPaperQuestion,
     GradingRecord,
     HomeworkQuestion,
     Question,
@@ -90,6 +91,9 @@ class GradingState(TypedDict):
 
     # ---- 老师决定（interrupt resume 回来后装填）----
     teacher_decision: dict        # {"action": confirm/edit/reject, "score"?, "comment"?}
+    # grader_type 覆盖：只有"老师完全自主批改"（/grade/{id}/manual）会填 "teacher"，
+    #   其余流程留空，由 commit_grade 按 题型 + action 推断
+    grader_type: str | None
 
     # ---- 最终产物 ----
     final_score: float | None
@@ -142,15 +146,22 @@ def _fetch_full_score(answer: StudentAnswer, question: Question) -> float:
 
     得到的数据：answer 一条作答记录 / question 一道题目
 
-    要做的操作：source_type=homework → 查 homework_questions 拿该题分值；其他来源按 100
+    要做的操作：
+        source_type=homework → 查 homework_questions 拿该题分值
+        source_type=exam     → 查 exam_paper_questions 拿卷面分值
+        其他来源              → 按 100
 
-    返回：满分分值（float），形如 4.0；作业题查不到分值时退回 100.0
+    返回：满分分值（float），形如 4.0；查不到分值时退回 100.0
 
-    为什么：作业题分值由老师布置时定（可能 4 分），统计得分率必须用真分值，不能统一按 100
+    为什么：作业题分值由老师布置时定（可能 4 分），考试题分值由卷面分账定
+           （可能 2.5 分，一份卷 25 题不可能每题都 100 分）。
+           统计得分率必须用真分值，不能统一按 100 —— 否则一次考试
+           客观题答对一题就能记 100 分，BKT 与总分会一起失真。
     """
-    if answer.source_type == "homework":
-        session = get_session_factory()()
-        try:
+    session = None
+    try:
+        if answer.source_type == "homework":
+            session = get_session_factory()()
             hq = session.execute(
                 select(HomeworkQuestion)
                 .where(HomeworkQuestion.homework_id == answer.source_id)
@@ -158,8 +169,21 @@ def _fetch_full_score(answer: StudentAnswer, question: Question) -> float:
             ).scalar_one_or_none()
             if hq:
                 return hq.score
-        finally:
+
+        elif answer.source_type == "exam":
+            session = get_session_factory()()
+            pq = session.execute(
+                select(ExamPaperQuestion)
+                .where(ExamPaperQuestion.paper_id == answer.source_id)
+                .where(ExamPaperQuestion.question_id == question.id)
+            ).scalar_one_or_none()
+            if pq:
+                return pq.score
+
+    finally:
+        if session is not None:
             session.close()
+
     return 100.0
 
 
@@ -190,13 +214,21 @@ def fetch_answer(state: GradingState) -> dict:
         if question is None:
             raise ValueError(f"questions 里没有 id={answer.question_id} 的题目")
 
+        # 手写图片：本系统没接图像识别，图片地址不能当文本喂给 LLM（它会编出"我看到..."），
+        # 但要明确告诉模型"这份作答还有图"，评语才会提示老师人工核对图片部分。
+        student_text = answer.content or ""
+        attachments = answer.attachment_json or []
+        if attachments:
+            student_text = (student_text + f"\n（另附 {len(attachments)} 张手写解题图片，"
+                                          "系统未做图像识别，图片内容需人工核对）").strip()
+
         return {
             "question_id": question.id,
             "student_id": answer.student_id,
             "kp_id": question.kp_id,
             "question_type": question.question_type,
             "question_content": question.content,
-            "student_answer": answer.content,
+            "student_answer": student_text,
             "standard_answer": question.answer,
             "reference_analysis": question.analysis or "",
             "full_score": _fetch_full_score(answer, question),
@@ -425,9 +457,15 @@ def commit_grade(state: GradingState) -> dict:
             return {"status": already.status, "final_score": already.final_score}
 
         # ---- 1. grader_type 定型：谁拍的板就记谁 ----
+        #   state 里显式带了 grader_type 就照它写 —— 老师完全自主批改
+        #   （/grade/{id}/manual）没有 AI 建议、也不是 edit，按下面的推断会记成 "llm"，
+        #   成绩来源就假了：人工判的分标成模型判的，后续统计"AI 采纳率"会全错。
         action = state["teacher_decision"].get("action", "auto")
 
-        if state["question_type"] in ("choice", "fill"):
+        if state.get("grader_type"):
+            grader_type = state["grader_type"]
+
+        elif state["question_type"] in ("choice", "fill"):
             grader_type = "rule"                    # 规则直判
 
         elif action == "edit":

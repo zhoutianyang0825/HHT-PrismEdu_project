@@ -198,7 +198,7 @@ def _recent_answered_ids(student_id: int, days: int = 7) -> set[int]:
 
 
 def persist_quiz(state: QuizState) -> dict:
-    """Step 5 · 写 diagnostic_quizzes 表：target_points_json 留痕可解释性。
+    """Step 5 · 写 diagnostic_quizzes 表，留痕可解释。
 
     generated_reason 面向学生的一句话："你最近在 xxx 上连错了 3 次"。
 
@@ -210,10 +210,11 @@ def persist_quiz(state: QuizState) -> dict:
                 "generated_reason": "最近没有错题记录，暂不需要诊断测验"}
 
     top = state["target_points"][0] if state["target_points"] else None
+    count = len(state["question_ids"])      # 实际配出的题数：题库不足时会少于 total
 
     reason = (f"你最近在「{top['reason']}」对应的知识点上掌握度偏低"
-              f"（{top['p_known']:.2f}），这套 8 题小测帮你逐个补齐"
-              if top else "针对性诊断测验"
+              f"（{top['p_known']:.2f}），这套 {count} 题小测帮你逐个补齐"
+              if top else f"针对性诊断测验（{count} 题）"
             )
 
     session = get_session_factory()()
@@ -228,9 +229,11 @@ def persist_quiz(state: QuizState) -> dict:
         session.flush()               # 拿自增 id
         quiz_id = quiz.id
         session.commit()
+
     except Exception:
         session.rollback()            # 半路失败整笔回滚，不留脏行
         raise
+
     finally:
         session.close()
 
@@ -238,7 +241,7 @@ def persist_quiz(state: QuizState) -> dict:
 
 
 def build_quiz_graph():
-    """组装 S-10 子图：纯顺序链路，无 interrupt，不需要 checkpointer。"""
+    """组装 S-10测验生成 子图：纯顺序链路，无 interrupt，不需要 checkpointer。"""
 
     builder = StateGraph(QuizState)
     builder.add_node("fetch_error_kps", fetch_error_kps)
@@ -253,4 +256,5 @@ def build_quiz_graph():
     builder.add_edge("rank_by_bkt", "select_quiz_questions_node")
     builder.add_edge("select_quiz_questions_node", "persist_quiz")
     builder.add_edge("persist_quiz", END)
+
     return builder.compile()

@@ -51,6 +51,8 @@ from app.models import (
     DiagnosticQuiz,
     ErrorLog,
     ExamPaper,
+    ExamPaperClass,
+    ExamPaperQuestion,
     Homework,
     HomeworkQuestion,
     KnowledgePoint,
@@ -166,12 +168,24 @@ def _seed(session) -> None:
                  evidence="演示数据：十字相乘常数项配错", explanation_strategy="回到整式乘法逆运算"),
         DiagnosticQuiz(id=51, student_id=11, target_points_json=[],
                        question_ids=[21, 22, 23], generated_reason="演示测验"),
+        # 卷 61 直接建成 published：学生端/老师端用例要靠"已发布 + 已推送"才看得到
         ExamPaper(id=61, title="初二数学演示卷", grade="初二", exam_type="monthly",
                   quota_plan_json={"plan": {"items": []}, "question_ids": [21, 22, 23],
                                    "gaps": []},
-                  status="draft", created_by=5, remark="矩阵测试种子"),
+                  status="published", created_by=5, remark="矩阵测试种子"),
         BKTState(student_id=11, kp_id="kp_crossmult", p_known=0.30),
         BKTState(student_id=12, kp_id="kp_crossmult", p_known=0.60),
+    ])
+
+    # ---- 考试派发三件套（M7）：卷 61 已推送给 1 班，S001 能考、T001 能批 ----
+    #   为什么不留给 res.exam_assign 去建：矩阵用例的执行顺序由 pytest 决定，
+    #   学生端用例可能先跑。种子直接把"已发布 + 已推送 + 卷面固化"摆好，
+    #   每个用例看到的都是同一份确定状态。
+    session.add_all([
+        ExamPaperQuestion(paper_id=61, question_id=21, seq=1, score=33.0),
+        ExamPaperQuestion(paper_id=61, question_id=22, seq=2, score=33.0),
+        ExamPaperQuestion(paper_id=61, question_id=23, seq=3, score=34.0),
+        ExamPaperClass(paper_id=61, class_id=1),
     ])
     session.commit()
 
@@ -222,7 +236,6 @@ def _install_stubs(monkeypatch) -> None:
     monkeypatch.setattr("app.api.student._get_grading_graph", lambda: fake_grading)
     monkeypatch.setattr("app.api.student._get_quiz_graph", lambda: fake_quiz)
     monkeypatch.setattr("app.api.teacher._get_grading_graph", lambda: fake_grading)
-
     # crew 假报告：AnalysisReport 三字段合法即可，端点只做 model_dump 转发
     def fake_paper_analysis(metrics, title="", grade=""):
         from app.schemas.analysis import AnalysisReport
@@ -238,6 +251,19 @@ def _install_stubs(monkeypatch) -> None:
                 "review": {"passed": True, "problems": [], "summary": "（stub）通过"}}
 
     monkeypatch.setattr("app.crews.exam_crew.run_exam_generation", fake_exam_generation)
+
+    # ⑤ 老师自主批改（/grade/{id}/manual）会真跑 commit_grade + 归因 + BKT。
+    #    这里把"开 session 的入口"都指到 sqlite 沙盒（模块级 from-import 各有一份引用，
+    #    只 patch app.db.session 不够），再把 LLM 归因与 Neo4j 同步换成假实现 ——
+    #    矩阵只测越权，不该因为一条用例去连真 PG / 真 Neo4j。
+    def fake_attribute(state):
+        return {"error_type": "粗心"}
+
+    def fake_mastery(state):
+        return {"p_known_before": 0.20, "p_known_after": 0.30}
+
+    monkeypatch.setattr("app.services.manual_grading.attribute_error", fake_attribute)
+    monkeypatch.setattr("app.services.manual_grading.update_mastery_node", fake_mastery)
 
 
 # =====================================================================
@@ -282,6 +308,8 @@ ENDPOINTS = [
        allow=STUDENT_OK),
     Ep("stu.homework_questions", "GET", "/api/student/homework/{homework_id}/questions",
        "/api/student/homework/31/questions", allow=STUDENT_OK),
+    Ep("stu.homework_progress", "GET", "/api/student/homework/{homework_id}/progress",
+       "/api/student/homework/31/progress", allow=STUDENT_OK),
     Ep("stu.mastery", "GET", "/api/student/mastery/{student_id}",
        "/api/student/mastery/11", allow=STUDENT_OK),
     Ep("stu.quiz_generate", "POST", "/api/student/quiz/generate",
@@ -291,6 +319,22 @@ ENDPOINTS = [
     Ep("stu.quiz_submit", "POST", "/api/student/quiz/{quiz_id}/submit",
        "/api/student/quiz/51/submit",
        {"answers": [{"question_id": 21, "content": "A"}]}, STUDENT_OK),
+
+    # ---- student 考试模块（M7）----
+    #   卷 61 已推给 1 班：学生 11（1班）与 admin 的代演档案 13（1班）都能取卷。
+    Ep("stu.exams", "GET", "/api/student/exams", "/api/student/exams", allow=STUDENT_OK),
+    Ep("stu.exam_detail", "GET", "/api/student/exams/{paper_id}",
+       "/api/student/exams/61", allow=STUDENT_OK),
+    Ep("stu.exam_submit", "POST", "/api/student/exams/{paper_id}/submit",
+       "/api/student/exams/61/submit",
+       {"answers": [{"question_id": 21, "content": "x=2 或 x=3"},
+                    {"question_id": 22, "content": "A"}]}, STUDENT_OK),
+    # 上传口不涉及他人数据，但要求有学生档案（最小权限）：teacher/researcher 无档案 → 403
+    Ep("stu.image_upload", "POST", "/api/student/upload/answer-image",
+       "/api/student/upload/answer-image",
+       {"filename": "a.png", "data": "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "purpose": "answer"}, STUDENT_OK),
 
     # ---- teacher 组（router 级 require_any("teacher")）----
     Ep("tea.homework_create", "POST", "/api/teacher/homework/create",
@@ -308,6 +352,9 @@ ENDPOINTS = [
        "/api/teacher/grade/41", allow=TEACHER_OK),
     Ep("tea.grade_confirm", "POST", "/api/teacher/grade/{answer_id}/confirm",
        "/api/teacher/grade/41/confirm", {"action": "confirm"}, TEACHER_OK),
+    # 自主批改：不经过 AI 直接给分。41 是主观题作答，满分由 homework_questions 定（5 分）
+    Ep("tea.grade_manual", "POST", "/api/teacher/grade/{answer_id}/manual",
+       "/api/teacher/grade/41/manual", {"judgement": "partial", "score": 2}, TEACHER_OK),
     Ep("tea.grade_pending", "GET", "/api/teacher/grade/pending",
        "/api/teacher/grade/pending", allow=TEACHER_OK),
     Ep("tea.answer_detail", "GET", "/api/teacher/answers/{answer_id}",
@@ -319,10 +366,26 @@ ENDPOINTS = [
     Ep("tea.classes", "GET", "/api/teacher/classes", "/api/teacher/classes",
        allow=TEACHER_OK),
 
+    # ---- teacher 考试批改（M7）----
+    #   卷 61 推给 1 班 → T001（教 1 班 math）可见；T002 教 2 班 → 卷列表空、分组 403
+    Ep("tea.exam_papers", "GET", "/api/teacher/exam/papers", "/api/teacher/exam/papers",
+       allow=TEACHER_OK),
+    Ep("tea.exam_grading", "GET", "/api/teacher/exam/{paper_id}/grading",
+       "/api/teacher/exam/61/grading", allow=TEACHER_OK),
+    Ep("tea.exam_pregrade", "POST",
+       "/api/teacher/exam/{paper_id}/question/{question_id}/pre-grade",
+       "/api/teacher/exam/61/question/21/pre-grade", allow=TEACHER_OK),
+
     # ---- research 组（router 级 require_aggregate_channel）----
     #   年级类端点还有 _ensure_grade_in_scope：teacher 只有 detail 通道、没有
     #   aggregate 任命 → 年级集合为空 → 403。矩阵如实钉住这个行为：
     #   "看年级聚合"必须有 researcher 任命，teacher 的聚合权限止步于本班（T-03）。
+    # my-scope 只是"告诉我我能看哪些年级"，本身不含数据 → teacher 也放行（回空列表）
+    Ep("res.my_scope", "GET", "/api/research/my-scope", "/api/research/my-scope",
+       allow={"teacher", "researcher", "dual", "admin"}),
+    # naming 是课程元数据（章节名/知识点名），不含学生数据、不按年级限制 → teacher 也放行
+    Ep("res.naming", "GET", "/api/research/naming", "/api/research/naming",
+       allow={"teacher", "researcher", "dual", "admin"}),
     Ep("res.grade_mastery", "GET", "/api/research/grade/{grade}/mastery",
        "/api/research/grade/初二/mastery", allow=RESEARCH_GRADE_OK),
     Ep("res.mastery_compare", "GET", "/api/research/mastery/compare",
@@ -337,10 +400,12 @@ ENDPOINTS = [
        "/api/research/exam/61/quota", allow=RESEARCH_GRADE_OK),
     Ep("res.exam_assign", "POST", "/api/research/exam/{paper_id}/assign",
        "/api/research/exam/61/assign", {"class_ids": [1]}, RESEARCH_GRADE_OK),
-    # 异常题清单无年级参数、无明细（只回题干前 60 字）→ teacher 也放行
-    Ep("res.abnormal_list", "GET", "/api/research/questions/abnormal",
-       "/api/research/questions/abnormal",
-       allow={"teacher", "researcher", "dual", "admin"}),
+    # 出卷记录（教研端新增模块）：带 grade 就要走 _ensure_grade_in_scope，
+    # 所以口径和年级聚合一致 —— teacher 无 aggregate 任命即 403
+    Ep("res.exam_papers", "GET", "/api/research/exam/papers",
+       "/api/research/exam/papers?grade=初二", allow=RESEARCH_GRADE_OK),
+    Ep("res.exam_paper_detail", "GET", "/api/research/exam/{paper_id}/detail",
+       "/api/research/exam/61/detail", allow=RESEARCH_GRADE_OK),
 
     # ---- admin 组（router 级 require_any("admin")）----
     Ep("adm.users", "GET", "/api/admin/users", "/api/admin/users", allow={"admin"}),
@@ -411,9 +476,17 @@ def api(monkeypatch):
     # ① FastAPI 的 Depends(get_db) → sqlite 会话
     app.dependency_overrides[get_db] = lambda: session
     # ② 服务层自建会话（get_session_factory）也落同一个 sqlite
+    #    ⚠️ 只 patch app.db.session 不够：模块里 `from app.db.session import get_session_factory`
+    #    会把函数对象绑进自己的命名空间，已经 import 过的模块拿不到新值。
+    #    人工批改会经 manual_grading + commit_grade 两处开 session，两个都要指过来。
     monkeypatch.setattr("app.db.session.get_session_factory", lambda: maker)
+    monkeypatch.setattr("app.services.manual_grading.get_session_factory", lambda: maker)
+    monkeypatch.setattr("app.graphs.teacher.grading_graph.get_session_factory", lambda: maker)
     # ③ 图 / crew stub
     _install_stubs(monkeypatch)
+    # ③.5 图片落盘换成假实现：矩阵只测"上传口鉴权"，不该往仓库 data/ 里写真文件
+    monkeypatch.setattr("app.api.student._persist_upload",
+                        lambda blob, purpose, suffix=".jpg": f"/uploads/{purpose}/test.png")
     # ④ 种子数据
     _seed(session)
 
@@ -581,14 +654,17 @@ class TestDataScopeIsolation:
 def test_paper_analyze_writes_back_quality_flags(api):
     """走真 analyze 链路（crew 除外）：指标 → 异常题写回 quality_flag=abnormal。
 
-    模拟数据（4 个学生 × 3 题，满分 100/3≈33.33）：
+    模拟数据（4 个学生 × 3 题，满分取卷面固化分值：q21=33 / q22=33 / q23=34）：
       q21 全错 → P=0.0（过难）；q22 全对 → P=1.0（过易）；q23 高低分开 → P=0.5 D=1.0（正常）
     预期：abnormal_written == 2（q21/q22 从 normal 翻成 abnormal，q23 不动）
     为什么重要：这一步就是"考后分析 → 考前改进"的回流落点，
               下次 /exam/generate 抽题时 abnormal 沉底降权（selection_engine._pool_sort_key）。
+    为什么满分按题取：P = 均分 ÷ 该题满分。若三题都用同一个均摊值，q22 的 33 分
+              除以 33.33 会算出 P=0.99，和一题真满分 33 的 P=1.0 混在一起看不出差别；
+              换成真实分值后，"过易"的判定才和线上完全一致。
     """
     client, session = api
-    full = 100.0 / 3
+    full = {21: 33.0, 22: 33.0, 23: 34.0}     # 种子 exam_paper_questions 的真实分值
 
     # 造 4 人作答（档案 11/12/13/14 已在种子数据里）
     answers = []
@@ -598,10 +674,10 @@ def test_paper_analyze_writes_back_quality_flags(api):
             StudentAnswer(source_type="exam", source_id=61, question_id=21,
                           student_id=sid, content="（演示）", is_correct=False, score=0.0),
             StudentAnswer(source_type="exam", source_id=61, question_id=22,
-                          student_id=sid, content="（演示）", is_correct=True, score=full),
+                          student_id=sid, content="（演示）", is_correct=True, score=full[22]),
             StudentAnswer(source_type="exam", source_id=61, question_id=23,
                           student_id=sid, content="（演示）",
-                          is_correct=rank >= 2, score=full if rank >= 2 else 0.0),
+                          is_correct=rank >= 2, score=full[23] if rank >= 2 else 0.0),
         ]
     session.add_all(answers)
     session.commit()
@@ -620,3 +696,69 @@ def test_paper_analyze_writes_back_quality_flags(api):
     # 再次 analyze 幂等：已 abnormal 不重复计数、不覆盖 disabled
     resp2 = client.post("/api/research/paper/61/analyze", headers=_headers(session, "researcher"))
     assert resp2.json()["abnormal_written"] == 0
+
+
+# =====================================================================
+# 七、教研端年级选项的范围（老大 2026-10-26 反馈）
+# =====================================================================
+class TestResearchGradeOptions:
+    """前端年级选项必须由任命决定，不能是三连硬编码。
+
+    踩坑现场：教研组长首页/班级对比/出卷下拉都写死 ["初一","初二","初三"]，
+    组长点"初一"能看到空数据 —— 他只是被任命管初二；出卷选初一还会 403。
+    """
+
+    def _add_grade3(self, session):
+        """库里造一个初三年级（任命里没有它）——用来验证它不出现在选项里。"""
+        session.add(Class(id=3, grade="初三", name="3班"))
+        session.commit()
+
+    def test_researcher_sees_only_appointed_grade(self, api):
+        """R001 只被任命 初二 → 选项里只有初二，学段顺序由后端排好。"""
+        client, session = api
+        self._add_grade3(session)
+
+        body = client.get("/api/research/my-scope", headers=_headers(session, "researcher")).json()
+
+        assert body["grades"] == ["初二"], f"只该看到任命的初二，实际 {body['grades']}"
+        assert body["limited"] is True
+        assert "math" in body["subjects"]
+
+    def test_dual_role_does_not_widen_grade_scope(self, api):
+        """双角色（teacher + researcher）也只看任命年级——两通道并存但永不融合。"""
+        client, session = api
+        self._add_grade3(session)
+
+        body = client.get("/api/research/my-scope", headers=_headers(session, "dual")).json()
+
+        assert body["grades"] == ["初二"]
+
+    def test_teacher_without_appointment_gets_empty_grades(self, api):
+        """纯老师没有教研任命 → 空列表（前端据此显示"还没有教研任命"）。"""
+        client, session = api
+
+        body = client.get("/api/research/my-scope", headers=_headers(session, "teacher")).json()
+
+        assert body["grades"] == []
+        assert body["subjects"], "学科至少要能回退到题库里存在的值"
+
+    def test_admin_sees_all_grades_from_db(self, api):
+        """admin 不受任命限制 → 年级来自 classes 表，不是硬编码三连。"""
+        client, session = api
+        self._add_grade3(session)
+
+        body = client.get("/api/research/my-scope", headers=_headers(session, "admin")).json()
+
+        assert set(body["grades"]) == {"初二", "初三"}
+        assert body["grades"] == ["初二", "初三"], "年级要按学段顺序排，不能字典序"
+        assert body["limited"] is False
+
+    def test_unappointed_grade_still_403(self, api):
+        """★ 前端不显示只是第一道闸：直接调接口照样 403（不能只靠 UI 藏）。"""
+        client, session = api
+        self._add_grade3(session)
+
+        resp = client.get("/api/research/grade/初三/mastery", headers=_headers(session, "researcher"))
+
+        assert resp.status_code == 403
+        assert "初二" in resp.json()["detail"], "报错要说清自己管哪些年级"

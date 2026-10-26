@@ -34,14 +34,18 @@ class LoginIn(BaseModel):
 class StudentChatIn(BaseModel):
     """学生单题作答/引导的入参（SSE 流式接口）。
 
-    student_id  students 表主键（学生档案 id，不是 users.id）；
-    question_id 当前在做题的 id —— thread_id 用它拼 {student_id}_{question_id}；
-    message     学生这句话原文，如 "这题答案是多少"。
+    student_id   students 表主键（学生档案 id，不是 users.id）；
+    question_id  当前在做题的 id —— thread_id 用它拼 {student_id}_{question_id}；
+    message      学生这句话原文，如 "这题答案是多少"；
+    homework_id  学生是从哪份作业点进来的（自由练习时为 None）——
+                 判分落库时决定 source_type：有值 → homework（老师端按它查全班作答）；
+                 None → chat（只给诊断测验供错题数据）。
     """
 
     student_id: int = Field(description="学生档案 id（students.id）")
     question_id: int = Field(description="题目 id")
     message: str = Field(min_length=1, max_length=2000, description="学生输入")
+    homework_id: int | None = Field(default=None, description="作业 id；自由练习不传")
 
 
 class StudentResumeIn(BaseModel):
@@ -49,11 +53,14 @@ class StudentResumeIn(BaseModel):
 
     字段与 StudentChatIn 相同：thread_id 由 student_id+question_id 拼出，
     message 会包进 Command(resume=message) 喂给挂起的图。
+    homework_id 也带着：挂起状态下 resume 不会走新 invoke，
+    若图里记的作业 id 与本次不一致，接口层用 update_state 打补丁补上。
     """
 
     student_id: int = Field(description="学生档案 id")
     question_id: int = Field(description="题目 id")
     message: str = Field(min_length=1, max_length=2000, description="学生对上一次提示的回应")
+    homework_id: int | None = Field(default=None, description="作业 id；自由练习不传")
 
 
 class QuizAnswerItem(BaseModel):
@@ -71,6 +78,45 @@ class QuizSubmitIn(BaseModel):
     """
 
     answers: list[QuizAnswerItem] = Field(min_length=1, description="逐题作答")
+
+
+class ExamAnswerItem(BaseModel):
+    """考试里单题的作答。
+
+    与 QuizAnswerItem 的区别只有 attachments：
+        选择题 content="A"；填空题 content="x=1或x=3"；
+        解答题可能只交了手写图 → content 允许为空串，attachments 给图片地址。
+    """
+
+    question_id: int = Field(description="题目 id")
+    content: str = Field(default="", max_length=8000, description="学生作答原文（可为空，见 attachments）")
+    attachments: list[str] = Field(default_factory=list, max_length=5,
+                                  description="手写解题图片地址，最多 5 张")
+
+
+class ExamSubmitIn(BaseModel):
+    """交卷：一次提交整份试卷。
+
+    为什么一次性提交而不是逐题实时入库：
+        考试是一次性行为，逐题入库会让"交卷"失去意义（学生边做老师边看，
+        还会被当成已交卷）；也要防重复提交盖掉记录。
+    """
+
+    answers: list[ExamAnswerItem] = Field(min_length=1, description="逐题作答")
+
+
+class ImageUploadIn(BaseModel):
+    """手写解题图上传（base64 data URL 形式，不用 multipart）。
+
+    为什么不用文件上传：
+        前端 core.js 的 http 只发 JSON，引入 FormData 要再写一套请求封装；
+        base64 走同一条通路、同一套鉴权与报错处理，代价是体积大 1/3——
+        前端已用 canvas 压到 1280px/JPEG，一张 200~400KB，可以接受。
+    """
+
+    filename: str = Field(default="answer.png", max_length=128, description="原始文件名（只用于取扩展名）")
+    data: str = Field(min_length=32, description="data:image/png;base64,... 或裸 base64")
+    purpose: str = Field(default="answer", max_length=32, description="用途，决定存放子目录")
 
 
 # ================================================================
@@ -98,11 +144,36 @@ class GradeConfirmIn(BaseModel):
     action=confirm  采纳 AI 建议分；
     action=edit     用 score 字段的分数（0~full_score）；
     action=reject   驳回，分数不生效，BKT 不更新。
+
+    为什么 reject 还留着：前端已只暴露「采纳 / 改分」两条路——
+        老师认为 AI 判错时，走「自主批改」直接给分更符合直觉（还能部分给分），
+        reject 只是"这题不算分"，批完这题仍是待批状态，容易让老师以为批过了。
+        保留这个值是为了兼容已落库的 rejected 记录与脚本调用，前端不再发它。
     """
 
     action: Literal["confirm", "edit", "reject"] = Field(description="裁决动作")
     score: float | None = Field(default=None, ge=0, description="action=edit 时必填")
     comment: str | None = Field(default=None, max_length=500, description="可选，覆盖 AI 评语")
+
+
+class ManualGradeIn(BaseModel):
+    """老师完全自主批改（不经过 AI 建议）。
+
+    为什么需要它：
+        原链路只有"AI 批改 → 老师采纳/改分"，老师想自己判一道题
+        （尤其手写图题、AI 明显判错的题）没有入口，只能先跑 AI 再改分，
+        多两次点击还容易把 AI 的错误建议带进成绩。
+
+    judgement 三选一：
+        correct → 直接给满分（题目分值）
+        wrong   → 给 0 分
+        partial → 用 score 字段的分（必须 0 < score < 满分）
+    """
+
+    judgement: Literal["correct", "wrong", "partial"] = Field(description="正确/错误/部分正确")
+    score: float | None = Field(default=None, ge=0,
+                                description="judgement=partial 时必填，0 < score < 满分")
+    comment: str | None = Field(default=None, max_length=500, description="可选，给学生的评语")
 
 
 # ================================================================

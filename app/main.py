@@ -10,9 +10,11 @@
 # 【OpenAPI 文档】启动后开 http://localhost:8100/docs 可视化调试全部端点——
 #   这是 FastAPI 自带的调试福利，比 curl 快。
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api import admin, auth, research, student, teacher
 
@@ -73,6 +75,14 @@ app.include_router(student.router, prefix="/api/student", tags=["student"])
 app.include_router(teacher.router, prefix="/api/teacher", tags=["teacher"])
 app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+
+
+# ---- 静态文件：学生上传的手写解题图 ----
+# 前端只存相对路径（/uploads/answer/202610/ab12.jpg），显示时拼 API_BASE。
+# 不挂这个 mount，学生提交后老师点开批改页会看到一堆碎图（404）。
+UPLOAD_DIR = Path(__file__).resolve().parents[1] / "data" / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 

@@ -43,6 +43,7 @@ from app.models import (
     Chapter,
     Class,
     ErrorLog,
+    ExamPaper,
     Homework,
     HomeworkQuestion,
     KnowledgePoint,
@@ -51,7 +52,7 @@ from app.models import (
     StudentAnswer,
     User,
 )
-from app.schemas.api import GradeConfirmIn, HomeworkCreateIn
+from app.schemas.api import GradeConfirmIn, HomeworkCreateIn, ManualGradeIn
 
 # 接口调用的最前置校验：角色的守卫
 # 本组角色守卫：teacher 或 admin 才能进（挂 router 级，接口级角色校验）
@@ -202,9 +203,12 @@ def homework_submissions(homework_ref: str,
     返回：
         {"total": 100, "page": 1, "size": 20,
          "homework": {"id": 4, "title": "演示历史作业", "class_id": 2},
+         "summary": {"question_total": 10, "students": 18, "completed": 12, "partial": 6},
          "items": [{"answer_id": 1, "student": "演示学生01(20260066)", ...}]}
 
     为什么：一份作业 20 人 × 5 题就有 100 条作答，全量拉走没必要，所以按页取。
+        summary 单独给"做齐 / 做一半"人数：学生端是逐题实时入库的，
+        "有作答"不等于"交了作业"，只看 total 会把做 1 题就走的人算成已交。
     """
     hw = _resolve_homework(db, homework_ref)
 
@@ -219,6 +223,29 @@ def homework_submissions(homework_ref: str,
     total = db.execute(
         select(func.count()).select_from(StudentAnswer).where(*where)
     ).scalar_one()
+
+    # ---- 完成度汇总：做齐全部题才算"完成"，只做一部分算"部分完成" ----
+    # 逐题实时入库后，"有作答"不再等于"交了作业"——学生做 1 题就走也会有条目，
+    # 必须按"该生作答数 vs 作业总题数"分开算，否则老师看到的提交率虚高
+    question_total = db.execute(
+        select(func.count()).select_from(HomeworkQuestion)
+        .where(HomeworkQuestion.homework_id == hw.id)
+    ).scalar_one()
+    per_student = db.execute(
+        select(StudentAnswer.student_id,
+               func.count(func.distinct(StudentAnswer.question_id)))
+        .where(*where)
+        .group_by(StudentAnswer.student_id)
+    ).all()
+    completed = sum(1 for _, n in per_student if question_total and n >= question_total)
+
+    summary = {
+        "question_total": question_total,
+        "students": len(per_student),          # 至少答过一题的人数
+        "completed": completed,                # 全做齐的人数
+        "partial": len(per_student) - completed,
+    }
+
     rows = db.execute(
         select(StudentAnswer, Student.student_no, User.name, Question.content)
         .join(Student, Student.id == StudentAnswer.student_id)
@@ -232,6 +259,7 @@ def homework_submissions(homework_ref: str,
     return {
         "total": total, "page": page, "size": size,
         "homework": {"id": hw.id, "title": hw.title, "class_id": hw.class_id},
+        "summary": summary,
         "items": [
             {"answer_id": a.id, "student": f"{name}({no or '-'})", "question": content[:40],
              "content": a.content, "is_correct": a.is_correct, "score": a.score,
@@ -307,10 +335,107 @@ def grade_confirm(answer_id: int, body: GradeConfirmIn,
 
     decision = {"action": body.action, "score": body.score, "comment": body.comment}
     out = graph.invoke(Command(resume=decision), cfg)
-    return {"answer_id": answer_id, "status": out.get("status"),
+
+    # ---- t4 考试卷要回写该生的考试记录总分 ----
+    # 批改图只管"这一条作答"，不知道它属于某场考试；
+    # 学生端考试记录里的总分必须由这里重算，否则永远只显示客观题得分。
+    attempt = _recalc_exam_attempt(db, answer_id)
+
+    resp = {"answer_id": answer_id, "status": out.get("status"),
             "final_score": out.get("final_score"),
             "p_known_before": out.get("p_known_before"),
             "p_known_after": out.get("p_known_after")}
+    if attempt is not None:
+        resp["attempt"] = {
+            "status": attempt.status,
+            "objective_score": attempt.objective_score,
+            "subjective_score": attempt.subjective_score,
+            "total_score": attempt.total_score,
+            "full_score": attempt.full_score,
+        }
+    return resp
+
+
+def _recalc_exam_attempt(db: Session, answer_id: int):
+    """这条作答若是考试卷的，重算对应学生的考试记录；否则返回 None。
+
+    得到的数据：answer_id
+
+    要做的操作：查作答 → 不是 source_type='exam' 就直接返回 None →
+                是就调 exam_delivery.recalc_attempt 并 commit
+
+    返回：更新后的 ExamAttempt 或 None
+    """
+    answer = db.get(StudentAnswer, answer_id)
+    if answer is None or answer.source_type != "exam":
+        return None
+
+    from app.services.exam_delivery import recalc_attempt
+
+    attempt = recalc_attempt(db, answer.source_id, answer.student_id)
+    db.commit()
+    return attempt
+
+
+# =====================================================================
+# 🟢 老师自主批改：不经过 AI，直接判 正确 / 错误 / 部分正确 并给分
+# =====================================================================
+@router.post("/grade/{answer_id}/manual")
+def grade_manual(answer_id: int, body: ManualGradeIn,
+                 user: CurrentUser = Depends(get_current_user),
+                 scopes: list[dict] = Depends(get_scopes), db: Session = Depends(get_db)):
+    """老师完全自主给分（不需要先跑 AI）。
+
+    得到的数据：
+        answer_id=261；body.judgement ∈ {correct, wrong, partial}
+        body.score 只在 partial 时有意义（如满分 8 分给 3.5）
+        body.comment 可选评语
+
+    要做的操作：
+        t1 班级越权守卫（和我教的班必须对得上）
+        t2 exam_delivery.recalc 需要的考试记录先不动 —— 判完再回写总分
+        t3 manual_grade 服务：算分 → commit_grade 写三表 → 判错才归因 → BKT 回写
+        t4 该作答若是考试卷的，重算该生考试总分
+
+    返回：
+        {"answer_id": 261, "final_score": 1.0, "full_score": 4.0,
+         "is_correct": false, "status": "confirmed", "grader_type": "teacher",
+         "p_known_before": 0.1, "p_known_after": 0.16,
+         "attempt": {...}}   # 只有考试作答才有
+
+    为什么单独一个端点而不是复用 /grade/{id}/confirm：
+        confirm 的语义是"resume 挂起的批改图"，图没挂着它直接 409。
+        老师想自己判一道题时，图根本没跑过——硬塞进 confirm 会逼老师
+        "先点 AI 批改、再点改分"，还让 AI 的建议分进了库。
+    """
+    _ensure_class_in_scope(scopes, user, _answer_class_id(db, answer_id))
+
+    from app.services.manual_grading import ManualGradeError, manual_grade
+
+    try:
+        out = manual_grade(
+            answer_id=answer_id,
+            judgement=body.judgement,
+            score=body.score,
+            comment=body.comment,
+            teacher_user_id=user.id,
+        )
+    except ManualGradeError as exc:
+        # 文案里带"已经批过了"的走 409（状态冲突），其余是参数问题走 400
+        code = (status.HTTP_409_CONFLICT if "已经批过" in str(exc)
+                else status.HTTP_400_BAD_REQUEST)
+        raise HTTPException(code, detail=str(exc))
+
+    attempt = _recalc_exam_attempt(db, answer_id)
+    if attempt is not None:
+        out["attempt"] = {
+            "status": attempt.status,
+            "objective_score": attempt.objective_score,
+            "subjective_score": attempt.subjective_score,
+            "total_score": attempt.total_score,
+            "full_score": attempt.full_score,
+        }
+    return out
 
 
 # 展示待批改，待确认列表
@@ -339,12 +464,65 @@ def pending_grading(user: CurrentUser = Depends(get_current_user),
 
     rows = db.execute(stmt).all()
 
+    # ---- 每条作答的满分：人工批改的"部分正确"要给分数，前端必须有上限 ----
+    #   不能在循环里逐条 _fetch_full_score（每条自己开 session，50 条 = 50 次连接），
+    #   按来源表批量取两张映射表再拼。
+    full_map = _batch_full_scores(db, [a for a, *_ in rows])
+
     return [
         {"answer_id": a.id, "student": f"{name}({no or '-'})",
          "question_type": qtype, "question": content[:40], "content": a.content,
+         "full_score": full_map.get(a.id, 100.0),
          "submitted_at": str(a.submitted_at)}
         for a, no, name, qtype, content in rows
     ]
+
+
+def _batch_full_scores(db: Session, answers: list[StudentAnswer]) -> dict[int, float]:
+    """批量算一批作答各自的满分，返回 {answer_id: full_score}。
+
+    得到的数据：answers —— student_answers 行列表（可能混着 homework / exam 来源）
+
+    要做的操作：
+        t1 按来源分两组（homework → homework_questions，exam → exam_paper_questions）
+        t2 每组一次 IN 查询拿 (来源id, 题目id) → 分值
+        t3 按作答回填；查不到（历史脏数据）给 100 兜底，和 _fetch_full_score 口径一致
+
+    返回：{261: 8.0, 262: 4.0, ...}
+
+    为什么批量：
+        待批改列表一次 50 条，逐条调 _fetch_full_score 会开 50 个独立 session，
+        批改页首屏直接慢成几百毫秒。
+    """
+    from app.models import ExamPaperQuestion, HomeworkQuestion
+
+    hw_pairs = {(a.source_id, a.question_id) for a in answers if a.source_type == "homework"}
+    exam_pairs = {(a.source_id, a.question_id) for a in answers if a.source_type == "exam"}
+
+    score_of: dict[tuple[str, int, int], float] = {}
+
+    if hw_pairs:
+        rows = db.execute(
+            select(HomeworkQuestion.homework_id, HomeworkQuestion.question_id,
+                   HomeworkQuestion.score)
+            .where(HomeworkQuestion.homework_id.in_({p[0] for p in hw_pairs}))
+        ).all()
+        for hid, qid, sc in rows:
+            score_of[("homework", hid, qid)] = float(sc)
+
+    if exam_pairs:
+        rows = db.execute(
+            select(ExamPaperQuestion.paper_id, ExamPaperQuestion.question_id,
+                   ExamPaperQuestion.score)
+            .where(ExamPaperQuestion.paper_id.in_({p[0] for p in exam_pairs}))
+        ).all()
+        for pid, qid, sc in rows:
+            score_of[("exam", pid, qid)] = float(sc)
+
+    return {
+        a.id: score_of.get((a.source_type, a.source_id, a.question_id), 100.0)
+        for a in answers
+    }
 
 
 
@@ -533,3 +711,163 @@ def my_classes(user: CurrentUser = Depends(get_current_user),
         ids = _detail_class_ids(scopes)
         rows = db.execute(select(Class).where(Class.id.in_(ids))).scalars().all() if ids else []
     return [{"id": c.id, "grade": c.grade, "name": c.name} for c in rows]
+
+
+# =====================================================================
+# M7 考试批改：按试卷 / 按题目分组（主观题）
+# =====================================================================
+def _visible_class_ids(scopes: list[dict], user: CurrentUser) -> list[int] | None:
+    """我可见的班级集合；admin 返回 None 表示不限。
+
+    得到的数据：scopes（双通道权限）
+
+    要做的操作：只取 detail 通道的 class_ids
+
+    返回：{3, 7} 排序后的列表；admin → None
+
+    为什么单独抽：
+        卷列表、按题分组两处都要用同一个口径，
+        直接在两个函数里各写一遍 _detail_class_ids 迟早写岔。
+    """
+    if "admin" in user.roles:
+        return None
+    return sorted(_detail_class_ids(scopes))
+
+
+@router.get("/exam/papers")
+def exam_papers(user: CurrentUser = Depends(get_current_user),
+                scopes: list[dict] = Depends(get_scopes),
+                subject: str | None = None, db: Session = Depends(get_db)):
+    """我教的班里已推送的试卷 + 交卷/待批改统计（考试批改页的左侧列表）。
+
+    得到的数据：当前账号的 detail scope；可选 subject 过滤
+
+    要做的操作：
+        t1 取 exam_paper_classes 里属于我任教班的卷子
+        t2 每卷统计：推送班名、应交人数、已交人数、主观题待批改条数
+
+    返回：
+        [{"paper_id": 3, "title": "初二数学月考卷", "grade": "初二",
+          "class_names": ["初二1班"], "question_count": 20,
+          "student_count": 39, "submitted_count": 31, "pending_count": 7}]
+
+    为什么老师端要按"卷"而不是按"作答"列：
+        待批改页原本是一条条作答流水（谁、哪题、什么时候交），
+        老师拿到的是一堆散点，无法回答"这份卷我还剩几题没批"。
+        试卷维度才有"批改进度"，题维度才有"同一题横向对比"。
+    """
+    from app.services.exam_delivery import teacher_papers
+
+    return teacher_papers(db, _visible_class_ids(scopes, user), subject)
+
+
+@router.get("/exam/{paper_id}/grading")
+def exam_grading_groups(paper_id: int,
+                        user: CurrentUser = Depends(get_current_user),
+                        scopes: list[dict] = Depends(get_scopes),
+                        db: Session = Depends(get_db)):
+    """按题目分组的主观题作答（老师批改主视图）。
+
+    得到的数据：paper_id
+
+    要做的操作：
+        t1 卷子存在性 + 越权守卫（这份卷必须推给了我教的某个班）
+        t2 取卷面全部主观题（seq 升序），一题一组
+        t3 每题下面挂全班学生的作答：姓名、原文、手写图、判分状态
+
+    返回：见 exam_delivery.group_grading 的 docstring
+
+    为什么按题分组：
+        老师批一道题时脑子里只有一条评分标准，连续看 30 个学生对同一题的答案，
+        尺度才稳；按学生排会在一份卷里反复切换标准。
+        AI 批改同理——同一题的标准答案/采分点固定，逐份跑出来的建议更一致。
+    """
+    from app.services.exam_delivery import group_grading
+
+    paper = db.get(ExamPaper, paper_id)
+    if paper is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"试卷 {paper_id} 不存在")
+
+    class_ids = _visible_class_ids(scopes, user)
+    if class_ids is not None:
+        from app.models import ExamPaperClass
+
+        pushed = set(db.execute(
+            select(ExamPaperClass.class_id).where(ExamPaperClass.paper_id == paper.id)
+        ).scalars().all())
+        if not pushed & set(class_ids):
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                detail="forbidden: 这份试卷没有推送到你的班级")
+
+    return group_grading(db, paper, class_ids)
+
+
+@router.post("/exam/{paper_id}/question/{question_id}/pre-grade")
+def exam_pregrade_question(paper_id: int, question_id: int,
+                           user: CurrentUser = Depends(get_current_user),
+                           scopes: list[dict] = Depends(get_scopes),
+                           db: Session = Depends(get_db)):
+    """对某一题的全部待批改作答批量跑 AI 批改，返回每条的建议分（老师再逐条裁决）。
+
+    得到的数据：paper_id + question_id
+
+    要做的操作：
+        t1 取该题在本卷里所有 is_correct IS NULL 的作答（限我可见的班）
+        t2 逐条 invoke 批改图：客观题直接终局，主观题停在 interrupt 返回建议
+        t3 汇总每条的建议分 / 评语 / 置信度
+
+    返回：
+        {"question_id": 21, "graded": 3, "failed": 0,
+         "items": [{"answer_id": 501, "status": "pending_confirm",
+                    "suggestion": {"ai_score": 6.0, "full_score": 8.0, ...}}]}
+
+    为什么按题批量而不是按人：
+        一条评分标准跑 N 份，模型每次只换了学生作答；
+        按人批量时每题都要重新认题干，慢一倍还容易漂。
+        失败不整体回滚：某一条 LLM 超时不该让另外 29 条白跑。
+    """
+    paper = db.get(ExamPaper, paper_id)
+    if paper is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"试卷 {paper_id} 不存在")
+
+    class_ids = _visible_class_ids(scopes, user)
+
+    stmt = (
+        select(StudentAnswer.id)
+        .join(Student, Student.id == StudentAnswer.student_id)
+        .where(StudentAnswer.source_type == "exam")
+        .where(StudentAnswer.source_id == paper.id)
+        .where(StudentAnswer.question_id == question_id)
+        .where(StudentAnswer.is_correct.is_(None))
+        .order_by(StudentAnswer.id)
+    )
+    if class_ids is not None:
+        stmt = stmt.where(Student.class_id.in_(class_ids))
+
+    answer_ids = list(db.execute(stmt).scalars().all())
+    if not answer_ids:
+        return {"question_id": question_id, "graded": 0, "failed": 0, "items": []}
+
+    graph = _get_grading_graph()
+    items: list[dict] = []
+    failed = 0
+    for aid in answer_ids:
+        cfg = {"configurable": {"thread_id": f"grading_{aid}"}}
+        try:
+            out = graph.invoke({"answer_id": aid, "teacher_user_id": user.id}, cfg)
+        except Exception as exc:       # 单条失败不拖累整批
+            failed += 1
+            items.append({"answer_id": aid, "status": "error",
+                          "message": f"{type(exc).__name__}: {exc}"})
+            continue
+
+        if "__interrupt__" in out:
+            items.append({"answer_id": aid, "status": "pending_confirm",
+                          "suggestion": out["__interrupt__"][0].value})
+        else:
+            items.append({"answer_id": aid, "status": out.get("status"),
+                          "is_correct": out.get("is_correct"),
+                          "final_score": out.get("final_score")})
+
+    return {"question_id": question_id, "graded": len(answer_ids) - failed,
+            "failed": failed, "items": items}

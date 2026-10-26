@@ -140,3 +140,101 @@ def test_route_after_guide_message_types():
     """另外两条分支：末条 AIMessage→respond；末条 HumanMessage→重新分类。"""
     assert route_after_guide({"messages": [AIMessage(content="讲解")]}) == "respond"
     assert route_after_guide({"messages": [HumanMessage(content="我不会")]}) == "classify_intent"
+
+
+# =====================================================================
+# 闲聊（off_topic）：不能复用上一轮的判分结果
+# =====================================================================
+def test_respond_off_topic_ignores_stale_is_correct(monkeypatch):
+    """★ 死因钉子：学生答错后再闲聊，不能回"还没对，别急"。
+
+    踩坑现场（老大 2026-10-26 截图）：学生在做题，随口问"你是哪里人"，
+    AI 连回三条"还没对，别急。可以说「讲解一下」…"。
+    根因是 is_correct 是上一轮判分留在 state 里的 False，
+    而 respond 里根本没有 off_topic 分支，直接落到"答错鼓励"那条。
+    """
+    import app.graphs.student.nodes as nodes
+
+    monkeypatch.setattr(nodes, "_small_talk_reply",
+                        lambda st: "我是棱镜课堂的学习助手，咱们先把这题推一步？")
+
+    out = nodes.respond({
+        "messages": [HumanMessage(content="你是哪里人")],
+        "intent": "off_topic",
+        "is_correct": False,        # ← 上一轮的判分结果还在
+        "question_id": 1,
+    })
+
+    content = out["messages"][0].content
+    assert "还没对" not in content, "闲聊不该复用上一轮的判分文案"
+    assert "学习助手" in content
+
+
+def test_respond_off_topic_wins_over_correct_grade(monkeypatch):
+    """答对后闲聊也不能回"✓ 正确！标准解答…"——那是上一轮的事。"""
+    import app.graphs.student.nodes as nodes
+
+    monkeypatch.setattr(nodes, "_small_talk_reply", lambda st: "嗨，先把这题收个尾？")
+
+    out = nodes.respond({
+        "messages": [HumanMessage(content="我们来聊下天")],
+        "intent": "off_topic",
+        "is_correct": True,
+        "question_id": 1,
+    })
+
+    assert "标准解答" not in out["messages"][0].content
+
+
+def test_small_talk_reply_falls_back_when_llm_fails(monkeypatch):
+    """LLM 挂了也要有回复：闲聊不是主链路，不能把整轮对话卡死。"""
+    import app.graphs.student.nodes as nodes
+
+    class _Q:
+        content = "Rt△ABC 中 ∠C=90°，AB=10，sinA=0.6，则 BC=____"
+
+    def boom(**kw):
+        raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(nodes, "_fetch_question", lambda qid: _Q())
+    monkeypatch.setattr(nodes, "get_llm", boom)
+
+    text = nodes._small_talk_reply({
+        "messages": [HumanMessage(content="你是哪里人")],
+        "question_id": 1,
+    })
+
+    assert text and "我在" in text
+
+
+def test_classify_intent_clears_stale_flags(monkeypatch):
+    """★ classify_intent 每轮都要清掉 is_correct / force_explain。
+
+    这两个是"一次性结果"，不清就会被下一轮误读；
+    attempt_count 不能清（整题累计轮数，清了永远满不了 3 轮）。
+    """
+    import app.graphs.student.nodes as nodes
+
+    class _Q:
+        content = "解方程 x²-6x+5=0"
+
+    class _R:
+        intent = "off_topic"
+        confidence = 0.9
+
+    monkeypatch.setattr(nodes, "_fetch_question", lambda qid: _Q())
+    monkeypatch.setattr(nodes, "get_llm", lambda **kw: object())
+    monkeypatch.setattr(nodes, "invoke_structured", lambda llm, schema, msgs: _R())
+
+    out = nodes.classify_intent({
+        "messages": [HumanMessage(content="你是哪里人")],
+        "question_id": 1,
+        "is_correct": False,        # ← 上一轮残留
+        "force_explain": True,      # ← 上一轮残留
+        "attempt_count": 3,         # ← 累计轮数，必须保住
+    })
+
+    assert out["intent"] == "off_topic"
+    assert out["is_correct"] is None
+    assert out["force_explain"] is False
+    assert "attempt_count" not in out, "累计轮数不能被重置"

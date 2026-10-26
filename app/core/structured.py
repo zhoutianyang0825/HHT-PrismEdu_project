@@ -22,11 +22,59 @@
 
 import json
 import re
-from typing import Type, TypeVar
+from typing import Type, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _json_sample(annotation, depth: int = 0) -> str | None:
+    """给一个类型注解生成 JSON 示例片段；认不出的类型返回 None。
+
+    得到的数据：字段的类型注解，如 list[GeneratedQuestion] / str / str | None
+    要做的操作：
+        list[X]  → 递归 X，外面套 []
+        嵌套 Pydantic 模型 → 展开成对象
+        其它（str/int/bool/Union/None…）→ 返回 None，由调用方用字符串占位
+    返回：JSON 片段字符串，或 None
+
+    为什么需要它：
+        兜底路径的 prompt 原来只列了顶层字段名，嵌套模型（如 {"questions": [生成题]}）
+        的内层字段模型根本看不到 —— 它会自己编字段名（把 content 写成 question），
+        于是 pydantic 校验直接失败。展开嵌套结构后它才知道该叫什么。
+    """
+    if depth > 4:                      # 防御自引用模型，别无限递归
+        return None
+
+    origin = get_origin(annotation)
+    if origin in (list, tuple):
+        args = get_args(annotation)
+        if not args:
+            return None
+        inner = _json_sample(args[0], depth + 1)
+        return f"[{inner}]" if inner is not None else None
+
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return _model_json_sample(annotation, depth + 1)
+
+    return None
+
+
+def _model_json_sample(model: Type[BaseModel], depth: int = 0) -> str:
+    """把一个 Pydantic 模型展开成多行 JSON 示例（含嵌套字段）。"""
+    pad = "  " * depth
+    pad_inner = "  " * (depth + 1)
+    lines = []
+
+    for name, field in model.model_fields.items():
+        sample = _json_sample(field.annotation, depth + 1)
+        if sample is None:
+            desc = (field.description or "值").replace("\n", " ")
+            sample = json.dumps(f"<{desc}>", ensure_ascii=False)
+        lines.append(f'{pad_inner}"{name}": {sample}')
+
+    return "{\n" + ",\n".join(lines) + f"\n{pad}}}"
 
 
 def _parse_loose_json(text: str) -> dict | None:
@@ -94,15 +142,15 @@ def invoke_structured(
 
 
     # ---- 路径 3：手写 JSON 约束 + 本地解析 ----
-    fields = "\n".join(
-        f'  "{name}": {"<" + (f.description or "值") + ">"}'
-        for name, f in schema.model_fields.items()
-    )
+    # 用 _model_json_sample 展开嵌套模型：只列顶层字段名不够，
+    # 内层模型（如 questions 数组里的元素）看不到字段名就会自己乱编
+    fields = _model_json_sample(schema)
 
     strict_msgs = [
         ("system",
          "你是一个只输出 JSON 的接口。**只输出一个 JSON 对象**，不要输出任何解释、markdown 代码围栏或者其它文字。\n"
-         f"JSON 字段格式：\n{{\n{fields}\n}}"),
+         "★ 字段名必须严格照抄下面的写法，不要改名、不要用同义词替换、不要增删字段。\n"
+         f"JSON 字段格式：\n{fields}"),
         *messages,
     ]
     kwargs = {"temperature": temperature} if temperature is not None else {}

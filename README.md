@@ -9,8 +9,8 @@
 |---|---|
 | 技术栈 | FastAPI + LangGraph（3 张图）+ CrewAI（2 套 crew）+ SQLAlchemy/Alembic |
 | 前端 | `web_app/`：原生 ES Modules + Hash 路由，**零构建、零 npm**（14 个文件，四端 SPA） |
-| 数据面 | PostgreSQL **23 张表**（含 PostgresSaver 快照）+ Neo4j 知识图谱 + Milvus 双 collection（题库/教材） |
-| 规模 | 后端 52 个端点 · 测试 552 条（其中越权矩阵 353 条） |
+| 数据面 | PostgreSQL **23 张表**（含 PostgresSaver 快照）+ Neo4j 知识图谱 + Milvus 双 collection（题库/教材）+ Redis（登录失败计数） |
+| 规模 | 后端 52 个端点 · 测试 569 条（其中越权矩阵 353 条） |
 | 配套文档 | `docs/01_PRD`（做什么）、`docs/02_技术架构`（怎么做）、`docs/03_开发计划`（顺序与判据）、`docs/04_设计决策`（为什么）、`docs/05_问题定位案例`（踩过的坑） |
 
 ---
@@ -45,6 +45,7 @@ flowchart LR
         PG[("PostgreSQL<br/>23 张业务表<br/>+ checkpointer 快照")]
         NEO[("Neo4j<br/>知识点图谱<br/>+ 掌握度副本")]
         MIL[("Milvus<br/>题库 / 教材<br/>双 collection")]
+        RED[("Redis<br/>登录失败计数<br/>滑动窗口 ZSET")]
     end
 
     AG --> DB
@@ -147,7 +148,7 @@ app/
 ├── services/     grading · wrong_record · exam_delivery · selection_engine · analysis · manual_grading …
 ├── tools/        graph_tools（Neo4j）· bank_tools / stats_tools（Milvus / Pandas）
 ├── models/       23 张表（user / org / content / learning / mastery / exam / audit）
-└── core/         deps（双通道 scope）· security · textfmt · structured（结构化输出三层兜底）
+└── core/         deps（双通道 scope）· security（bcrypt + JWT）· login_guard（失败计数：Redis / 内存）· textfmt · structured（结构化输出三层兜底）
 web_app/          前端：index.html · serve.py · assets/apple.css · src/{app,core,shell,charts}.js · src/views/*
 alembic/          迁移 0001~0003（含考试派发三张表）
 scripts/          check_env · seed_* · gen_demo_data · reset_demo（全部幂等可重跑）
@@ -160,7 +161,7 @@ docs/             01 PRD · 02 技术架构 · 03 开发计划 · 04 设计决�
 ## 三、环境准备与启动
 
 ```bash
-# 1) 起三容器（PG / Neo4j / Milvus；Milvus 首启要等 30~60 秒）
+# 1) 起容器（PG / Neo4j / Milvus / Redis；Milvus 首启要等 30~60 秒）
 docker compose up -d && sleep 60
 
 # 2) 装依赖 + 环境自检（四项连通全绿再往下）
@@ -205,41 +206,7 @@ cd web_app && python3 serve.py                    # 默认 5173，终端会打�
 
 ---
 
-## 五、三条主线的演示话术（三分钟录屏分镜）
-
-> 录屏 `demo.mp4` 按下面分镜录（QuickTime 新建屏幕录制即可，全程约 3 分钟）；「说什么」可直接照念。
-
-### 主线一：求答案 → 阶梯引导 → 诊断测验 → 批改 → BKT（约 90 秒）
-
-| 镜 | 操作 | 话术 |
-|---|---|---|
-| 1 | 登录 `S001` → 学习助手对某题输入「这题答案是多少？」 | "学生要答案，系统不给答案——给的是阶梯提示，逐级递进逼他自己想。" |
-| 2 | 再催一次「直接告诉我答案嘛」→ 收到更进一步的提示，仍无答案 | "再催也一样，引导只会更深一层，绝不出完整答案。" |
-| 3 | 点「诊断测验」→ 展示 8 题 + target_points | "从近 30 天错题出发，沿图谱追前置、按 BKT 最弱优先，每个入选点都带理由。" |
-| 4 | 提交作答 → 客观题当场出分 | "客观题规则直判，判完 BKT 立刻回写。" |
-| 5 | 切老师端确认主观题 → 回学生端看雷达图变化 | "主观题挂起等老师拍板；确认后掌握度更新，雷达图肉眼可见地动。" |
-
-### 主线二：定稿推送 → 整卷考试 → 按题批改 → 总分回写（约 90 秒）
-
-| 镜 | 操作 | 话术 |
-|---|---|---|
-| 1 | 教研端 `R001` 出卷 → 底部「定稿并推送给年级」勾班级 → 推送 | "定稿不是改个状态：这一刻卷面题目和每题分值被固化，推送范围写进 exam_paper_classes。" |
-| 2 | 看推送回执：`N 个班 · M 名学生 · K 位科任老师` | "发给谁了、多少人要考、卷面几题多少分，一眼看清。" |
-| 3 | 该班学生登录 → 左栏「考试」→ 开始考试 | "整卷一次作答：选择题点选项、填空题填答案、解答题写步骤或拍手写图。" |
-| 4 | 交卷 → 客观题立刻出分 + 逐题对错 | "客观题交卷即判，当场回写 BKT 和错题本；主观题进老师队列。" |
-| 5 | 老师登录 → 待批改 →「按试卷/题目批改」 | "主观题按题归堆：第 11 题下面是张三、李四、王五的作答，一条标准连批 30 份。" |
-| 6 | 「AI 批改本题全部」→ 逐条采纳/改分（或走自主批改） → 回学生端看记录 | "AI 一次给全组建议分，老师只做裁决；批完总分自动补齐、状态转已批完。" |
-
-### 主线三：出卷 → 虚拟作答 → 考后分析 → 异常题回流降权（约 90 秒）
-
-| 镜 | 操作 | 话术 |
-|---|---|---|
-| 1 | 教研端出月考卷 → 展示配额表 | "出卷先出配额表：知识点×难度×题型，LLM 只做规划，抽题是纯 Python、可复现。" |
-| 2 | 终端跑 `uv run python scripts/gen_demo_data.py --paper-id <id>` | "虚拟班级瞬间作答完毕——演示数据可再生，不用等真人考试。" |
-| 3 | 考后分析页选一份卷 →「开始分析」→ 展示 P/D 指标 + 异常题 | "指标是 Pandas 算的，一个数都不经 LLM 的手；每题满分取的是卷面真实分值。" |
-| 4 | 异常题已写回 quality_flag → 再出一次卷 | "关键一环：异常题沉底降权——考后分析直接变成考前改进，单向链路闭成环。" |
-
-**脚本辅助（演示前/中可随时跑）**：
+## 五、脚本辅助（演示前/中可随时跑）：
 
 ```bash
 uv run python scripts/gen_demo_data.py --paper-id <id>   # 给某卷合成虚拟作答
@@ -299,6 +266,7 @@ uv run pytest -q                 # 全量 552 条（交付前已跑绿）
 |---|---|
 | `tests/test_scope_matrix.py` | 🔴 越权全矩阵：52 端点 × 5 角色 + 匿名 + 数据级越权 + **路由对账**（新端点漏进矩阵会直接红） |
 | `tests/test_scope_isolation.py` | JWT 多角色 / 密码策略 / 双通道 scope / CSV 事务性 |
+| `tests/test_login_guard.py` | 登录失败计数：内存 vs Redis ZSET 逐条一致、窗口滑出、归一化、Redis 挂掉降级不抛错 |
 | `tests/test_mastery_bkt.py` | BKT 四条验证序列 |
 | `tests/test_quiz_generation.py` | 诊断测验目标点选择与配题规则 |
 | `tests/test_selection_engine.py` | 组卷配额、异常题降权、单点 ≤2 |
@@ -313,9 +281,8 @@ uv run pytest -q                 # 全量 552 条（交付前已跑绿）
 
 1. **无自动备份**：PG 数据卷靠手动 `docker exec prismedu-postgres pg_dump -U prismedu > backup.sql`，生产化需定时备份。
 2. **数据由 seed 脚本可再生**：`reset_demo.py` + `gen_demo_data.py` / `seed_*.py` 可重建全部数据，演示环境弄脏不用慌。
-3. **登录失败锁定在进程内存**：多 worker 各记各的，上生产要挪 Redis（见 04 文档 D11）。
+3. **登录失败计数默认走进程内存**：多 worker 时每个进程各记各的，锁定容易凑不齐。配 `.env` 的 `REDIS_URL`（compose 已带 Redis，映射到 6380）即切 Redis ZSET 共享计数；Redis 挂了会自动降级回内存并打 warning，登录不会因此失败。**锁定只按 username**，恶意用户可用错误密码把他人账号锁 15 分钟（DoS），要治需按 IP 限流（见 04 文档 D11-b）。
 4. **CORS 全开**：演示配置，生产要改白名单（`app/main.py`）。
 5. **小样本 P/D 会抖**：一份卷子只有十几人时区分度 D 波动大，异常判定建议 30 人以上再当真。
-6. **单次考试权重远大于一次作业**：班级学情是作业 + 测验 + 对话 + 考试混算，未按来源区分（数据层已具备条件，加一个 group by 即可）。
-7. **录屏 `demo.mp4` 需人工录制**：按第五节分镜录 3 分钟，脚本与话术已备好。
-8. LLM 依赖 DashScope 兼容 API（见 `.env.example`）；Neo4j 挂了图谱外扩自动降级，主流程不断链。
+6. **单次考试权重远大于一次作业**：班级学情是作业 + 测验 + 对话 + 考试混算，未按来源区分（数据层已具备条件，加一个 group by 即可）。\
+7. LLM 依赖 DashScope 兼容 API（见 `.env.example`）；Neo4j 挂了图谱外扩自动降级，主流程不断链。

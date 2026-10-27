@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     login_max_failures: int = 5                    # 连续失败 5 次
     lockout_minutes: int = 15                      # 锁定 15 分钟
 
+    # ---- 登录失败计数的存储后端 ----
+    #   redis_url 留空 = 只用进程内存（单 worker 够用，多 worker 各记各的）
+    #   填了就走 Redis，多个 worker 共享同一份计数 —— 这是挪 Redis 的唯一目的
+    redis_url: str = ""                            # 形如 redis://localhost:6380/0
+    login_guard_backend: str = "auto"              # auto（有 url 就用）/ redis（强制）/ memory（强制内存）
+
 
     
 

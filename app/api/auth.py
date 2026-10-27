@@ -4,6 +4,8 @@ M5-T1 · 登录端点：用户名密码 → 多角色 JWT（roles: [...] 数组�
 【完整时间线】（开发计划 M5 完成判据的 curl 场景）
   t1  POST /api/auth/login {"username": "R003", "password": "..."}
   t2  锁定检查：security.is_locked —— 15 分钟窗口内错满 5 次 → 423，试都不让试
+      （计数存哪由 login_guard 决定：有 REDIS_URL 就用 Redis，多 worker 共享；
+        没配或 Redis 挂了则退回进程内存，登录绝不因 Redis 故障而失败）
   t3  查 users 表：找不到 / is_active=False → 401（停用账号即使密码对也不放行）
   t4  verify_password（bcrypt checkpw）失败 → register_failed_login 记一笔 → 401
   t5  查 user_roles 表拼 roles 数组，如 ["teacher", "researcher"]

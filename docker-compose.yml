@@ -81,6 +81,22 @@ services:
 
 
 
+  # ---------- Redis：登录失败计数（多 worker 共享） ----------
+  #   只存"谁在窗口内失败了几次"这类短命计数，丢了不影响业务：
+  #   所以不配持久化（--save "" --appendonly no），重启即清空 —— 正好等于"锁定期自动解除"。
+  redis:
+    image: redis:7-alpine
+    container_name: prismedu-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6380:6379"                      # 宿主机用 6380：本机 OrbStack 里可能已有别的 Redis 占 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+
 volumes:
   pg_data:
   neo4j_data:

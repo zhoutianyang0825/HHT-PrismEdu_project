@@ -24,6 +24,7 @@
 | 向量库        | **Milvus standalone**           | pymilvus + langchain-milvus | Docker 单机版自带 etcd + MinIO；已有使用经验，一周内零运维成本                                          |
 | 知识图谱       | **Neo4j**                       | 5.26 社区版（OrbStack Docker） | 知识点前置关系是多跳查询，图数据库比邻接表优雅得多                                                      |
 | 关系存储       | **PostgreSQL 16**               | Docker 容器                 | 生产级同构，代码生成前切换成本≈0；Alembic 从第一张表管迁移；checkpointer 与业务表同库（一个备份方案覆盖全部状态） |
+| 短命计数       | **Redis 7**                     | redis-py（Docker 6380）     | 登录失败计数：多 worker 共享一份滑动窗口。不持久化（重启即清 = 锁定期自动解除）；连不上自动降级到进程内存，登录不因它失败（D11-b） |
 | API 框架     | **FastAPI**                     | fastapi + uvicorn         | 异步支持 SSE 流式，自带 OpenAPI 文档便于调试                                                  |
 | 流式输出       | **SSE**                         | sse-starlette             | Agent 引导过程需要打字机效果                                                              |
 | 结构化输出      | **Pydantic v2**                 | pydantic 2.x              | 错因归因、批改建议的 JSON schema 约束                                                      |
@@ -971,6 +972,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "sse-starlette>=2.1",
     "python-multipart>=0.0.9",
+    "redis>=5.0",                # 登录失败计数（多 worker 共享；没配 REDIS_URL 时走进程内存）
     # 数据
     "sqlalchemy>=2.0",
     "alembic>=1.13",

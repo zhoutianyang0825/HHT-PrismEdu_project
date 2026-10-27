@@ -4,7 +4,6 @@
  要做的操作：seed/admin 导入用 hash_password；登录用 verify_password + 锁定检查；
             签发用 create_access_token(roles=[...])
 """
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -22,6 +21,7 @@ import bcrypt
 #   坏处：签发后无法主动作废，所以有效期不能给太长（本项目 12h），且停用账号要在 get_current_user 里再查库核对
 from jose import JWTError, jwt
 
+from app.core import login_guard
 from app.core.config import settings
 
 # 所有的角色容器
@@ -73,41 +73,31 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 # ---------------------------------------------------------------- 登录失败锁定
-# 形如 {"R003": [1739812345.1, 1739812401.3]}
-# 进程内存里的字典——单进程部署够用；上生产多 worker 各记各的，要挪 Redis（04 文档 D11 已记）
-_failure_log: dict[str, list[float]] = {}
-
-
+# 真正的计数放在 app/core/login_guard.py：
+#   - 有 REDIS_URL → Redis ZSET（多 worker 共享，这是挪 Redis 的唯一目的）
+#   - 没配 / 连不上 → 进程内存（等价于改造前的行为）
+# 这里保留三个老函数名，是为了 auth.py 和已有单测一行都不用改。
 def register_failed_login(username: str) -> bool:
     """记一次登录失败，返回是否已触发锁定。
 
     得到的数据：username
-    要做的操作：追加失败时间戳，清掉滑动窗口外的旧记录，数窗口内次数
-    返回：True = 已锁定（达 5 次），False = 还没锁
+    要做的操作：交给 login_guard 记一笔，窗口 = lockout_minutes
+    返回：True = 已锁定（窗口内达 login_max_failures 次），False = 还没锁
     """
-    now = time.time()
-    window = settings.lockout_minutes * 60
-
-    # 滑动窗口：只留 window 时间内的失败记录，窗口外的清掉
-    stamps = [t for t in _failure_log.get(username, []) if now - t < window]
-
-    # 追加当次失败信息
-    stamps.append(now)
-    _failure_log[username] = stamps
-    return len(stamps) >= settings.login_max_failures  # 错误时间的个数 达到最大次数，则返回true 锁定
+    return login_guard.register_failed(username)
 
 
 def is_locked(username: str) -> bool:
-    """账号当前是否处于锁定期（窗口内失败次数达标即锁满 15 分钟）。"""
-    now = time.time()
-    window = settings.lockout_minutes * 60
-    stamps = [t for t in _failure_log.get(username, []) if now - t < window]
-    return len(stamps) >= settings.login_max_failures
+    """账号当前是否处于锁定期（窗口内失败次数达标即锁）。
+
+    只数最近 lockout_minutes 分钟内的失败 —— 滑出窗口的自动不算数。
+    """
+    return login_guard.is_locked(username)
 
 
 def clear_failures(username: str) -> None:
     """登录成功后清空失败记录。"""
-    _failure_log.pop(username, None)
+    login_guard.clear_failures(username)
 
 
 

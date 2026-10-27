@@ -13,6 +13,7 @@ dependencies = [
     # ---- 服务层 ----
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    "redis>=5.0",                            # 登录失败计数（多 worker 共享）；没配 REDIS_URL 时走进程内存
     # ---- 数据层 ----
     "psycopg[binary]>=3.2",                  # PostgreSQL 16 驱动（业务表 + checkpointer 同库）
     "alembic>=1.13",                         # 迁移管理，从第一张表开始

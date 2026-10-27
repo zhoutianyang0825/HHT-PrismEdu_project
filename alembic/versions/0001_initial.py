@@ -1,7 +1,7 @@
 """首版迁移：创建全部 20 张业务表。
 
 首次：
-    执行 uv run alembic upgrade head，其实执行的是0001_xxx.py，
+    执行 uv run alembic upgrade head，其实执行的是0001_xxx.py;
     0001_xxx.py没有用 uv run alembic revision --autogenerate -m "init" 直接生成，
     而是手写 upgrade() 和  downgrade()方法，用creat_all 直接读取 Base.metadata，一次性建20张表。
 
@@ -14,11 +14,11 @@
 
 from alembic import op
 
-# 陌生点 revision / down_revision：迁移文件的"版本链"
-# Alembic 靠这两个变量，把所有迁移串成一条链。首版 down_revision=None（链条起点）；
-# 以后每个新迁移的 down_revision 填上一个迁移的 revision 号，upgrade head 就按链顺序执行
+# revision / down_revision：迁移文件的"版本链"，Alembic 靠这两个变量，把所有迁移脚本，串成一条链
+# 首版 down_revision = None（链条起点），以后每个新迁移的 down_revision 填：上一个迁移脚本的 revision 号，upgrade head 就按 版本链 顺序执行
 revision = "0001_initial"
-down_revision = None    # 链的起点
+down_revision = None    # 链的起点/前置版本
+
 branch_labels = None
 depends_on = None
 

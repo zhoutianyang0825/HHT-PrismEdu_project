@@ -1,4 +1,3 @@
-# app/services/selection_engine.py
 # 组卷引擎（架构文档 5.3）：M2 给 S-10 用，M4 扩展给 T-01/R-08 复用。
 #
 # 【本文件的最高原则——先记住这一句，后面全是它的展开】
@@ -57,22 +56,20 @@ def select_quiz_questions(
 ) -> tuple[list[dict], list[str]]:
     """S-10 诊断测验配题：按 Top5 知识点逐点抽题。
 
-    得到的数据：target_points=[{"kp_id": "kp_crossmult", "p_known": 0.33, "reason": "近30天连错3次"}, ...]
-                （已按优先级排序）；candidates_by_kp={"kp_crossmult": [{"id": 12,
-                "difficulty": "easy"}, ...], "kp_peifang": []}；total=8；per_kp_cap=2；
-                exclude_ids={31, 47}；subjective_cap=2
-    要做的操作：逐点定难度档→过滤近期做过的→目标档优先、他档兜底→单点 ≤2 截断→总量封顶
-                → 主观题整卷 ≤ subjective_cap 道
-    返回：([{"id": 12, "kp_id": "kp_crossmult", "difficulty": "easy"}, ...],
-           ["kp_peifang: 题库无可用题（目标档 medium，池中 0 题）"])
-    为什么：S-10 的核心配题规则，抽题必须可复现，所以做成纯函数便于单测
+    得到的数据：target_points=[{"kp_id": "kp_crossmult", "p_known": 0.33, "reason": "近30天连错3次"}, ...]（已按优先级排序）；
+              candidates_by_kp={"kp_crossmult": [{"id": 12,"difficulty": "easy"}, ...], "kp_peifang": []}；
+              total=8；per_kp_cap=2；
+              exclude_ids={31, 47}；
+              subjective_cap=2（题型配额） 默认整卷最多 2 道主观题。
 
-    ★ 为什么要 subjective_cap（题型配额）：
-        2026-10-26 给 63 个知识点各补了 2~3 道解答题，题库里主观题从 22 道涨到近 200 道。
-        不加这道闸，一个知识点 5 道题里 3 道是主观题，8 题卷子可能抽出 4~5 道——
-        而主观题在对话/测验里要等老师批改（is_correct=NULL），学生做完看不到分，
-        "即时反馈"的诊断测验就失去意义了。默认整卷最多 2 道主观题。
-        传 0 = 完全不要主观题（纯客观卷）；传 None 会 TypeError，想要不限就别传这个参数以外的方式改。
+    要做的操作：逐点定难度档 → 过滤近期做过的 → 目标档优先、他档兜底 → 单知识点 ≤2 截断 → 总量封顶
+             → 主观题整卷 ≤ subjective_cap 道
+
+    返回：([{"id": 12, "kp_id": "kp_crossmult", "difficulty": "easy"}, ...],
+          ["kp_peifang: 题库无可用题（目标档 medium，池中 0 题）"]
+        )
+
+    为什么：S-10 的核心配题规则，抽题必须可复现，所以做成纯函数便于单测
     """
     exclude_ids = exclude_ids or set()   # None → 空集合：下面统一用 `in set`，不用再判空
     picked: list[dict] = []             # 已选中的题（最终 8 道）
@@ -80,28 +77,29 @@ def select_quiz_questions(
     picked_subj = 0                     # 已选中的主观题数（整卷上限用）
 
     for tp in target_points:
-        # 总配额用完就停：不因为"还有知识点没照顾"而超发（8 题就是 8 题）
+        # 总配额用完就停
         if len(picked) >= total:
-            break                            # 后面的知识点本轮不再消费
+            break                          
         kp_id = tp["kp_id"]
+
         # 掌握度 → 难度档：0.33→easy、0.52→medium、0.85→hard（反相关，见 difficulty_for）
         want = difficulty_for(tp["p_known"])
 
         # 先把近期做过的题剔掉：exclude 发生在"取数之后、排序之前"，
-        #   若放到最后再剔，会出现"明明池里够题却只选出 1 道"的假缺口。
+        # 若放到最后再剔，会出现"明明池里够题却只选出 1 道"的假缺口。
         pool = [c for c in candidates_by_kp.get(kp_id, []) if c["id"] not in exclude_ids]
 
         # 【两段拼接实现"档内优先、他档兜底"】
         #   第一段：难度正好匹配 want 的（如 easy 目标 → easy 题）
         #   第二段：其余难度（medium + hard），保持原顺序
         #   拼起来后从头取 = 先吃目标档，目标档不够再吃别的档。
-        #   ⚠ 不要写成 sorted(key=难度==want)：布尔排序在 stable sort 下等价，但读起来费劲，
-        #     而且将来若要"邻档优先于远档"，两段拼接更容易改成三段。
         in_order = [c for c in pool if c["difficulty"] == want] + [c for c in pool if c["difficulty"] != want]
+
 
         # 取几道：单点上限 与 总量剩余额度 取小。
         #   例：第 4 个点时 picked=6，total=8 → min(2, 2)=2；第 5 个点时 picked=8 → 循环已 break。
         quota = min(per_kp_cap, total - len(picked))
+
 
         # 【主观题配额】配额用完时**跳过这一道、继续看后面的题**，而不是直接停。
         #   直接停会让"池子里主观题排前面"的知识点白白少选一道客观题——
@@ -131,14 +129,13 @@ def select_quiz_questions(
 
 
 def fetch_candidates_by_kp(kp_ids: list[str]) -> dict[str, list[dict]]:
-    """从 PG 题库 按知识点 批量取候选池（本文件唯一碰数据库的函数）。
+    """从 PG 题库 按知识点 批量取题目候选池（本文件唯一碰数据库的函数）。
 
     得到的数据：kp_ids=["kp_crossmult", "kp_peifang"]（传 [] 会生成非法 IN ()）
     要做的操作：一条 IN 查询捞回所有点的题，剔除 disabled，按 kp_id 分组
     返回：{"kp_crossmult": [{"id": 12, "kp_id": "kp_crossmult", "difficulty": "easy",
                            "question_type": "fill", "quality_flag": "normal"}, ...],
           "kp_peifang": []}
-    为什么：取数与策略分离——这里只备料（不排序、不滤难度），定档和排序都归上层引擎
     """
     from app.db.session import get_session_factory
     from app.models import KnowledgePoint, Question

@@ -38,6 +38,7 @@ from app.core.deps import (
     require_any,
     require_detail_channel,
 )
+from app.core.observability import build_callbacks
 from app.db.session import get_db
 from app.models import (
     Chapter,
@@ -288,6 +289,11 @@ def grade_trigger(answer_id: int,
     # 校验通过后，开始获得批改图
     graph = _get_grading_graph()
     cfg = {"configurable": {"thread_id": f"grading_{answer_id}"}}
+    cfg["callbacks"] = build_callbacks(
+        user_id=user.username, session_id=f"user_{user.id}",
+        trace_name="grading", tags=["teacher"],
+        metadata={"answer_id": answer_id, "trigger": "manual"},
+    )
 
 
     out = graph.invoke({"answer_id": answer_id, "teacher_user_id": user.id}, cfg)
@@ -322,6 +328,11 @@ def grade_confirm(answer_id: int, body: GradeConfirmIn,
 
     graph = _get_grading_graph()
     cfg = {"configurable": {"thread_id": f"grading_{answer_id}"}}
+    cfg["callbacks"] = build_callbacks(
+        user_id=user.username, session_id=f"user_{user.id}",
+        trace_name="grading", tags=["teacher"],
+        metadata={"answer_id": answer_id, "trigger": "confirm"},
+    )
 
     # ---- t2 幂等保护：没挂起的图 resume 会直接抛错，先查状态给出友好 409 ----
     snap = graph.get_state(cfg)
@@ -853,6 +864,11 @@ def exam_pregrade_question(paper_id: int, question_id: int,
     failed = 0
     for aid in answer_ids:
         cfg = {"configurable": {"thread_id": f"grading_{aid}"}}
+        cfg["callbacks"] = build_callbacks(
+            user_id=user.username, session_id=f"user_{user.id}",
+            trace_name="grading", tags=["teacher"],
+            metadata={"answer_id": aid, "trigger": "pregrade"},
+        )
         try:
             out = graph.invoke({"answer_id": aid, "teacher_user_id": user.id}, cfg)
         except Exception as exc:       # 单条失败不拖累整批

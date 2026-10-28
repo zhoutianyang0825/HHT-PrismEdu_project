@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     redis_url: str = ""                            # 形如 redis://localhost:6380/0
     login_guard_backend: str = "auto"              # auto（有 url 就用）/ redis（强制）/ memory（强制内存）
 
+    # ---- Langfuse 观测层（监控第二层：Agent 链路） ----
+    #   两个 key 留空 = 观测关闭，所有 build_callbacks() 返回空列表，零开销零报错。
+    #   keys 从 http://localhost:3100 的 UI 里建项目后拿（Settings → API Keys）。
+    langfuse_public_key: str = ""                  # 形如 pk-lf-...
+    langfuse_secret_key: str = ""                  # 形如 sk-lf-...
+    langfuse_host: str = "http://localhost:3100"   # 搬内网后改成 http://<服务器IP>:3100
+
 
     
 

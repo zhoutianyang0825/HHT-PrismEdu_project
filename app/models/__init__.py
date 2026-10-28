@@ -1,6 +1,6 @@
 """模型统一出口：import 一次拿到全部表，Alembic env.py 只需 import 本文件。
 
- 清点（23 张）：
+ 清点（24 张）：
   user.py     users / user_roles / teachers                          (3)
   org.py      classes / students / teaching_assignments / research_leads (4)
   content.py  chapters / knowledge_points / questions                (3)
@@ -10,7 +10,8 @@
   exam.py     diagnostic_quizzes / exam_papers / exam_paper_questions /
               exam_paper_classes / exam_attempts                     (5)
   audit.py    audit_logs                                             (1)
-  合计 23 ✓
+  login_log.py login_logs                                            (1)
+  合计 24 ✓
 """
 from app.db.base import Base
 from app.models.audit import AuditLog
@@ -29,6 +30,7 @@ from app.models.learning import (
     HomeworkQuestion,
     StudentAnswer,
 )
+from app.models.login_log import LoginLog
 from app.models.mastery import BKTState, MasteryRecord
 from app.models.org import Class, ResearchLead, Student, TeachingAssignment
 from app.models.user import Teacher, User, UserRole
@@ -43,4 +45,5 @@ __all__ = [
     "BKTState", "MasteryRecord",
     "DiagnosticQuiz", "ExamPaper", "ExamPaperQuestion", "ExamPaperClass", "ExamAttempt",
     "AuditLog",
+    "LoginLog",
 ]

@@ -28,6 +28,7 @@
 from functools import lru_cache
 
 from app.core.config import settings
+from app.core.observability import enable_crewai_tracing
 
 
 # ★ @lru_cache：给函数装"记忆"。第一次调用真建 LLM 实例，之后同样参数直接返回上次的实例。
@@ -47,6 +48,10 @@ def get_crewai_llm(temperature: float = 0.7):
     为什么：显式传三件套，避免 litellm 去读 OPENAI_API_KEY 打到 OpenAI 官方（见文件头坑①）
     """
     from crewai import LLM
+
+    # CrewAI 的 LLM 请求走 litellm 直发，不经过 LangChain callback 体系——
+    # 观测走 litellm 的 langfuse 钩子（keys 未配时内部直接返回 False，零开销）
+    enable_crewai_tracing()
 
     return LLM(
         model=f"openai/{settings.llm_model}",   # litellm 路由前缀，见 docstring

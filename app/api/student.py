@@ -45,6 +45,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, get_current_user
+from app.core.observability import build_callbacks
 from app.db.session import get_db
 from app.models import (
     BKTState,
@@ -277,6 +278,13 @@ def answer_stream(
             "homework_id": body.homework_id,
         }
     }
+    # 观测：本次图运行上报 Langfuse（keys 未配时返回空列表，零开销）
+    config["callbacks"] = build_callbacks(
+        user_id=user.username, session_id=f"user_{user.id}",
+        trace_name="student_chat", tags=["student"],
+        metadata={"student_id": body.student_id, "question_id": body.question_id,
+                  "homework_id": body.homework_id},
+    )
 
     # 防御性 resume：图还挂着，这条输入就是"对上一次提示的回应"，不能用新输入 invoke
     # 因为图都挂了checkpointer，所以先查：当前thread上，有没有interrupt挂起
@@ -325,6 +333,11 @@ def resume(body: StudentResumeIn, user: CurrentUser = Depends(get_current_user),
             "homework_id": body.homework_id,
         }
     }
+    config["callbacks"] = build_callbacks(
+        user_id=user.username, session_id=f"user_{user.id}",
+        trace_name="student_resume", tags=["student"],
+        metadata={"student_id": body.student_id, "question_id": body.question_id},
+    )
     gen = _stream_graph_events(graph, Command(resume=body.message), config)
     return StreamingResponse(gen, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache"})
@@ -489,7 +502,14 @@ def quiz_generate(user: CurrentUser = Depends(get_current_user), db: Session = D
 
     result = _get_quiz_graph().invoke(
         {"student_id": profile.id, "days": days, "total": total},
-        config={"configurable": {"thread_id": f"quiz_{profile.id}"}},
+        config={
+            "configurable": {"thread_id": f"quiz_{profile.id}"},
+            "callbacks": build_callbacks(
+                user_id=user.username, session_id=f"user_{user.id}",
+                trace_name="quiz_generate", tags=["student"],
+                metadata={"student_id": profile.id},
+            ),
+        },
     )
     
     if result.get("quiz_id") is None:
@@ -568,6 +588,11 @@ def quiz_submit(quiz_id: int, body: QuizSubmitIn,
     for item in body.answers:
         aid = answer_ids[item.question_id]
         cfg = {"configurable": {"thread_id": f"grading_{aid}"}}
+        cfg["callbacks"] = build_callbacks(
+            user_id=user.username, session_id=f"user_{user.id}",
+            trace_name="grading", tags=["student"],
+            metadata={"answer_id": aid, "trigger": "quiz_submit"},
+        )
         out = graph.invoke({"answer_id": aid, "teacher_user_id": user.id}, cfg)
 
         if "__interrupt__" in out:
@@ -767,6 +792,11 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
             continue
 
         cfg = {"configurable": {"thread_id": f"grading_{aid}"}}
+        cfg["callbacks"] = build_callbacks(
+            user_id=user.username, session_id=f"user_{user.id}",
+            trace_name="grading", tags=["student"],
+            metadata={"answer_id": aid, "trigger": "exam_submit"},
+        )
         out = graph.invoke({"answer_id": aid, "teacher_user_id": user.id}, cfg)
         score = float(out.get("final_score") or 0)
         objective_score += score

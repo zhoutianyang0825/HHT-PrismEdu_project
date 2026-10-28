@@ -15,7 +15,7 @@ M5-T3 · 管理后台 API（A-01）：用户 CRUD / CSV 导入 / 授课关系 / 
 """
 
 from csv import DictReader
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 import json
 
@@ -32,10 +32,12 @@ from app.models import (
     Class,
     DiagnosticQuiz,
     ErrorLog,
+    ExamAttempt,
     ExamPaper,
     GradingRecord,
     Homework,
     HomeworkQuestion,
+    LoginLog,
     MasteryRecord,
     ResearchLead,
     Student,
@@ -912,3 +914,170 @@ def list_audit_logs(action: str | None = Query(default=None),
     rows = db.execute(stmt.offset((page - 1) * size).limit(size)).scalars().all()
     return [{"id": a.id, "user_id": a.user_id, "action": a.action, "target": a.target,
              "detail": a.detail, "created_at": str(a.created_at)} for a in rows]
+
+
+# =====================================================================
+# 使用情况聚合（只读）：三端谁在用、用了多少 —— 监控第一层的查询口
+# =====================================================================
+@router.get("/usage/summary")
+def usage_summary(days: int = Query(default=7, ge=1, le=365),
+                  db: Session = Depends(get_db)):
+    """三端使用情况聚合：登录 / 学生作答 / 老师批改 / 教研出卷，一个端点全给。
+
+    得到的数据：days（统计窗口天数，1~365）
+    要做的操作：对 login_logs / student_answers / error_logs / grading_records /
+                homeworks / exam_papers / exam_attempts 各跑一条 group by 聚合，
+                全部只读、不碰业务写路径
+    返回：按 logins / students / teachers / research / by_class 分组的计数 dict
+
+    为什么全查现成表不埋点：
+        三端行为落库是架构红利（student_answers 四种来源共用一张表），
+        监控只是"换个视角读同一批数据"，不需要业务代码配合。
+
+    口径说明（对齐 commit_grade 的定型规则）：
+        - AI 采纳率 = grader_type=llm 且 confirmed ÷ (llm confirmed + grader_type=teacher)
+          主观题批改落点只有两种：老师采纳 AI（记 llm）/ 老师自己拍板（记 teacher），
+        - 正确率分母排除 is_correct 为 NULL 的行（主观题没批完不是"错"，模型注释同口径）。
+        - 活跃学生 = 窗口内有作答的不同 student_id；
+        - 活跃老师 = 审计里有批改动作的不同 user_id。
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # ---- 1. 登录：by_status 分组 + 成功登录的去重人数 ----
+    login_rows = db.execute(
+        select(LoginLog.status, func.count())
+        .where(LoginLog.created_at >= since)
+        .group_by(LoginLog.status)
+    ).all()
+    unique_login_users = db.execute(
+        select(func.count(func.distinct(LoginLog.user_id)))
+        .where(LoginLog.created_at >= since,
+               LoginLog.status == "success",
+               LoginLog.user_id.is_not(None))
+    ).scalar() or 0
+    logins_by_status = {s: c for s, c in login_rows}
+
+
+    # ---- 2. 学生：作答总量 / 来源分布 / 活跃数 / 正确率 ----
+    answers_total = db.execute(
+        select(func.count()).select_from(StudentAnswer)
+        .where(StudentAnswer.submitted_at >= since)
+    ).scalar() or 0
+    source_rows = db.execute(
+        select(StudentAnswer.source_type, func.count())
+        .where(StudentAnswer.submitted_at >= since)
+        .group_by(StudentAnswer.source_type)
+    ).all()
+    active_students = db.execute(
+        select(func.count(func.distinct(StudentAnswer.student_id)))
+        .where(StudentAnswer.submitted_at >= since)
+    ).scalar() or 0
+    correct_n = db.execute(
+        select(func.count()).select_from(StudentAnswer)
+        .where(StudentAnswer.submitted_at >= since, StudentAnswer.is_correct.is_(True))
+    ).scalar() or 0
+    wrong_n = db.execute(
+        select(func.count()).select_from(StudentAnswer)
+        .where(StudentAnswer.submitted_at >= since, StudentAnswer.is_correct.is_(False))
+    ).scalar() or 0
+    graded_n = correct_n + wrong_n          # NULL（未判分）不计入正确率分母
+    # 错因分布：join 回作答行，按作答时间过滤（error_logs 自己没有时间索引口径）
+    error_rows = db.execute(
+        select(ErrorLog.error_type, func.count())
+        .select_from(ErrorLog)
+        .join(StudentAnswer, ErrorLog.answer_id == StudentAnswer.id)
+        .where(StudentAnswer.submitted_at >= since)
+        .group_by(ErrorLog.error_type)
+    ).all()
+
+
+    # ---- 3. 老师：批改量 / AI 采纳率 / 活跃老师 / 出作业 ----
+    grading_rows = db.execute(
+        select(GradingRecord.grader_type, func.count())
+        .where(GradingRecord.created_at >= since)
+        .group_by(GradingRecord.grader_type)
+    ).all()
+    by_grader = {g: c for g, c in grading_rows}
+    llm_confirmed = db.execute(
+        select(func.count()).select_from(GradingRecord)
+        .where(GradingRecord.created_at >= since,
+               GradingRecord.grader_type == "llm",
+               GradingRecord.status == "confirmed")
+    ).scalar() or 0
+    teacher_gradings = by_grader.get("teacher", 0)
+    adopt_denom = llm_confirmed + teacher_gradings
+    active_teachers = db.execute(
+        select(func.count(func.distinct(AuditLog.user_id)))
+        .where(AuditLog.created_at >= since,
+               AuditLog.action.like("grading.%"),
+               AuditLog.user_id.is_not(None))
+    ).scalar() or 0
+    homeworks_created = db.execute(
+        select(func.count()).select_from(Homework)
+        .where(Homework.created_at >= since)
+    ).scalar() or 0
+
+
+    # ---- 4. 教研：出卷 / 推送 / 考试参与 ----
+    papers_created = db.execute(
+        select(func.count()).select_from(ExamPaper)
+        .where(ExamPaper.created_at >= since)
+    ).scalar() or 0
+    papers_published = db.execute(
+        select(func.count()).select_from(ExamPaper)
+        .where(ExamPaper.published_at.is_not(None),
+               ExamPaper.published_at >= since)
+    ).scalar() or 0
+    exam_attempts = db.execute(
+        select(func.count()).select_from(ExamAttempt)
+        .where(ExamAttempt.submitted_at >= since)
+    ).scalar() or 0
+
+
+    # ---- 5. 班级分布：作答量 + 活跃学生，按年级班名排 ----
+    class_rows = db.execute(
+        select(Class.id, Class.grade, Class.name,
+               func.count(StudentAnswer.id),
+               func.count(func.distinct(StudentAnswer.student_id)))
+        .select_from(Class)
+        .join(Student, Student.class_id == Class.id)
+        .join(StudentAnswer, StudentAnswer.student_id == Student.id)
+        .where(StudentAnswer.submitted_at >= since)
+        .group_by(Class.id, Class.grade, Class.name)
+        .order_by(Class.grade, Class.name)
+    ).all()
+
+    
+    return {
+        "days": days,
+        "since": str(since),
+        "logins": {
+            "total": sum(logins_by_status.values()),
+            "unique_users": unique_login_users,
+            "by_status": logins_by_status,
+        },
+        "students": {
+            "active": active_students,
+            "answers_total": answers_total,
+            "by_source": {s: c for s, c in source_rows},
+            "correct_rate": round(correct_n / graded_n, 4) if graded_n else None,
+            "errors_by_type": {t: c for t, c in error_rows},
+        },
+        "teachers": {
+            "active": active_teachers,
+            "gradings_total": sum(by_grader.values()),
+            "by_grader": by_grader,
+            "ai_adopt_rate": round(llm_confirmed / adopt_denom, 4) if adopt_denom else None,
+            "homeworks_created": homeworks_created,
+        },
+        "research": {
+            "papers_created": papers_created,
+            "papers_published": papers_published,
+            "exam_attempts": exam_attempts,
+        },
+        "by_class": [
+            {"class_id": cid, "class": f"{grade}{name}",
+             "answers": cnt, "active_students": stu}
+            for cid, grade, name, cnt, stu in class_rows
+        ],
+    }

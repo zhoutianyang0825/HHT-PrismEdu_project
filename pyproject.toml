@@ -32,6 +32,12 @@ dependencies = [
     "python-jose[cryptography]>=3.5.0",
     "bcrypt>=5.0.0",
     "dashscope>=1.27.7",
+    # Agent 链路观测（自托管 Langfuse v2；keys 未配时零开销）
+    #   ★ langfuse-langchain 必须显式声明：core 包 2.60.10 的集成代码只认 langchain 0.x
+    #     （import langchain.callbacks.base，1.x 已删），独立集成包才有 langchain v1 分支
+    #     （from langchain_core.callbacks import BaseCallbackHandler），且构造签名不变
+    "langfuse>=2.60,<3",
+    "langfuse-langchain>=2.60,<3",
     "sentence-transformers>=6.1.0",
     "langchain-openai>=1.7.2",
     "pypdf>=6.21.2",

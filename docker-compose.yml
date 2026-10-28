@@ -97,7 +97,61 @@ services:
       retries: 5
 
 
+  # ---------- Langfuse：Agent 链路观测（自托管，不出内网） ----------
+  #   学生引导 / 批改图 / 教研 crew 的每次 LLM 调用在这里留痕：
+  #   节点耗时瀑布、token 消耗、interrupt 挂起恢复全程，按 user/session 可查。
+  #   打开 http://localhost:3100 → 注册账号 → 建项目 → 拿 pk-lf-.../sk-lf-... 填进 .env。
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: prismedu-langfuse
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3100   # 搬到学校内网服务器时改成 http://<服务器IP>:3100
+      NEXTAUTH_SECRET: 0384f7f60058a429c7904d408b0add41e5735abeeade4b6ca062f965e562f2a0
+      SALT: 9c0be51b064a118d19cf1484e0e0e98366ca56b7e475d47f38f1bd2ec1c38719
+      # ENCRYPTION_KEY 必须是 64 位 hex（openssl rand -hex 32），base64 格式会启动 500
+      ENCRYPTION_KEY: ac3af002439441c2cdea1050aa3c6f36c9b1fc3d2f8067842c0e6b0c4b2a81a1
+      TELEMETRY_ENABLED: "false"            # 内网部署不上报遥测
+    ports:
+      - "3100:3000"                         # 容器内 3000，宿主机 3100（避开 8000/8100）
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+
+  # Langfuse 自己的库：单独一个 PG，绝不和业务库混用（升级/备份互不牵连）
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: prismedu-langfuse-db
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+
+  # ---------- Uptime-Kuma：系统层监控（监控第三层） ----------
+  #   每 60s 探活一遍全栈服务，挂了画红点 + 发通知（邮件/企业微信 webhook）。
+  #   打开 http://localhost:3001 → 注册管理员账号 → 按下方清单加监控项。
+  #   注意：uvicorn 是宿主机进程不是容器，容器内访问宿主机要用 host.docker.internal。
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: prismedu-kuma
+    ports:
+      - "3001:3001"                      # 容器内 3001，宿主机 3001（避开 3000/3100）
+    volumes:
+      - kuma_data:/app/data              # 监控配置和心跳历史都存这里，重启不丢
+    restart: unless-stopped
+
+
 volumes:
   pg_data:
   neo4j_data:
   milvus_data:
+  langfuse_pg_data:
+  kuma_data:

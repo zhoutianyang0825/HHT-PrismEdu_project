@@ -87,6 +87,7 @@
 - **为什么降级而不是 fail-closed**：校园场景峰值 3000 人登录，Redis 抖 10 秒就全校进不来，代价远大于"防护退化到单 worker 水准"。退化后仍等于改造前的水平，不是"没有防护"。
 - **为什么 member 要带 uuid**：ZSET 成员唯一，同一微秒的两次失败若用时间戳当 member，第二条只会更新 score 而不新增 → 第 5 次被吞、永不锁定。高并发爆破完全可能撞同一微秒。
 - **踩过的坑**：`get_guard()` 在持有 `_state_lock` 时调 `_demote()`（内部再抢同一把非重入锁）= 自死锁，单测表现为 pytest 永不返回。已拆成 `_demote_locked()`（调用方持锁）+ `_demote()`（自己拿锁）。
+- **key 与 TTL 设计（2026-10-28 补）**：key = `prismedu:login_fail:{归一化用户名}`——冒号三段 = 命名空间/用途/账号：① 前缀防撞车（OrbStack 里的 Redis 是多项目共享实例，不加前缀两项目的失败计数会叠在同一 key 上，无辜锁定）；② `{username}` 一个账号一个 ZSET，O(1) 定位计数桶；`_norm()` 转小写去空格，防止"R003 "和"r003"拆散统计。TTL = 窗口 + 60s 兜底：真正的计数依据是 ZSET 剪枝，TTL 只负责"剪干净后从容物理删除"防僵尸 key 堆积（设短于窗口会让锁定提前解除）；`register_failed` 每次续期，`is_locked` 只读不续。
 - **仍未做（诚实声明）**：锁定只按 username，攻击者可用错误密码把任意账号锁 15 分钟（DoS）。要治需"按 IP 限流 + 账号锁定只惩罚来源 IP"，属另一需求。
 
 ### D12 · 题库正确性：答案公式现算 + 断言自校验，不手抄
@@ -156,5 +157,25 @@
 - **原则沉淀**：**key 不是通用密码，是供应商绑定凭证**——base_url 指向谁，key 就必须是谁家的。
 
 ---
+
+---
+
+## 可观测性（2026-10-28，内网部署后的监控三层）
+
+### D22 · 可观测性走三层自托管：业务聚合 / Langfuse / Uptime-Kuma（2026-10-28）
+
+- **背景**：内网部署后要回答三个互相独立的问题——**谁在用**（行为）、**Agent 跑得怎么样**（链路）、**服务挂没挂**（存活）。学生作答正文等教学数据不出校园内网，云版 SaaS（Langfuse Cloud 等）直接排除，全部自托管。
+- **三层分工（每层回答一个问题，互相不可替代）**：
+  1. **业务行为层（自研，零新服务）**：`login_logs` 表（成功行 = 使用监控，失败行 = 安全监控，login 的 locked/bad_password/inactive/success 四个出口全留痕；user_id 裸 Integer 不带 FK，账号删了日志留存，同 audit_logs 设计）+ `GET /api/admin/usage/summary` 聚合端点。全查现成业务表**不埋点**——student_answers 四种来源（homework/quiz/exam/chat）共用一张表是架构红利，监控只是换个视角读同一批数据。
+  2. **Agent 链路层（Langfuse v2 自托管）**：8 个调用点统一走 `observability.build_callbacks()` 注入（student 5 + teacher 3），CrewAI 走 litellm 钩子。按 user_id（登录名）/ session_id（user_{账号id}）/ trace_name（student_chat / student_resume / quiz_generate / grading）三维归属；UI 里节点耗时瀑布、token 消耗、interrupt 挂起恢复全程可见。容器：langfuse + langfuse-db 双容器（host 3100），独立库不碰业务 PG。
+  3. **系统层（Uptime-Kuma 单容器，host 3001）**：6 个服务探活（后端 /health + PG/Neo4j/Milvus/Redis/Langfuse 的 TCP 口），红点 + 邮件/企业微信 webhook 通知。后端是宿主机进程，容器内探活必须用 `host.docker.internal:8100`。
+- **为什么 Langfuse 选 v2 而不是 v3**：v3 服务端要 clickhouse + minio + worker + redis 四件套，单机 16GB 且已有 5 个容器的环境太重；v2 单容器 + 独立 PG 够用。**代价与已知升级路径**：v2 SDK 的集成代码只认 langchain 0.x，必须显式装 `langfuse-langchain` 2.60.x（唯一带 langchain v1 分支的实现）；将来升 v3 = 服务端换架构 + SDK 换 metadata 归属方式（`langfuse_user_id` 等键），属已知升级成本。
+- **为什么观测代码做成"插销式"**：唯一入口 `app/core/observability.py`——keys 未配 / 包缺失 / handler 构造失败三条降级路径**都返回空列表**（空列表与无 callbacks 对 LangChain 完全等价），业务请求零感知。原则与 D11-b 相同：**观测归观测，业务归业务，监控组件故障绝不拖垮主链路**。
+- **统计口径（对齐 commit_grade 的定型规则）**：AI 采纳率 = grader_type=llm 且 confirmed ÷ (llm confirmed + grader_type=teacher)，rule 是客观直判不算采纳场景；正确率分母排除 is_correct NULL（未批完 ≠ 错）。
+- **踩过的坑（三条都是实跑踩出来的）**：
+  1. Langfuse 服务端 `ENCRYPTION_KEY` 必须是 **64 位 hex**（`openssl rand -hex 32`），给成 base64 直接整站 500，且报错 `Invalid environment variables` 不指明字段——要读 v2 分支 `web/src/env.mjs` 的 zod 校验逐项对照。
+  2. langfuse core 2.60.10 内置的 LangChain 集成只认 langchain 0.x 老路径，报错文案 "Please install langchain" 纯误导（langchain 明明装着）；真解是独立包 `langfuse-langchain>=2.60`（wheel 覆盖同名模块，带 `langchain.__version__.startswith("1")` 分支），构造签名与 core 完全一致。
+  3. pydantic-settings 加载 .env **不导出到 os.environ**，而 CrewAI 底下的 litellm 只认 `LANGFUSE_*` 环境变量——observability 里 `os.environ.setdefault` 同步一次（setdefault：容器真实 env 优先于 .env）。
+- **Langfuse trace 树里的 ERROR span 说明**：classify_intent 下的 ERROR 是 LangGraph interrupt 挂起（GraphBubbleUp）打断 LLM 调用的标记，**属正常现象**，不是模型报错——看链路时先看 trace 整体 status 再下结论。
 
 ## M2+ · （待里程碑结束时追加）

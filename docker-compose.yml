@@ -126,6 +126,8 @@ services:
       POSTGRES_USER: langfuse
       POSTGRES_PASSWORD: langfuse
       POSTGRES_DB: langfuse
+    ports:
+      - "5433:5432"                      # 宿主机 5433 给 DBeaver 直连（5432 已被业务 PG 占用）
     volumes:
       - langfuse_pg_data:/var/lib/postgresql/data
     healthcheck:

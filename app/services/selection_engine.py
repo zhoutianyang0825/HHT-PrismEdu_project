@@ -1,27 +1,26 @@
 # 组卷引擎（架构文档 5.3）：M2 给 S-10 用，M4 扩展给 T-01/R-08 复用。
 #
-# 【本文件的最高原则——先记住这一句，后面全是它的展开】
+# 【本文件的最高原则，后面全是它的展开】
 #   选题是确定性计算，绝不交给 LLM。
 #     - LLM 只决定"选哪些知识点、各占多少比重"（配额表 QuotaPlan，在 exam_crew 里出）
 #     - 真正抽题由本文件的 Python 规则执行：同一份输入 → 必然同一套题
-#   为什么较真到这个程度：老师会把卷子打印出来对着看。今天抽 A 卷、明天重跑抽出 B 卷，
-#   他会立刻判定"这系统不可信"。LLM 每次结果不同，所以它一步都不许踏进抽题。
+
 #
 # 【函数地图（谁在用谁）】
-#   M2 已有，接口已冻结（S-10 的 quiz_graph 与 tests/test_quiz_generation.py 依赖它们）：
+#   M2 已有，接口已冻结（S-10 的 quiz_graph 需要）：
 #     difficulty_for            掌握度 → 难度档（反相关：越弱越给基础题）
 #     select_quiz_questions     S-10 专用：Top5 知识点逐点配题，总量 8、单点 ≤2
 #     fetch_candidates_by_kp    从 PG 捞候选池（唯一碰 DB 的函数）
-#   M4 新增（R-08 需要，开发计划 M4-T2）：
+
+#   M4 新增（R-08 需要）：
 #     select_questions_by_quota 配额抽题：配额执行 / abnormal 沉底 / 近 7 天去重 /
 #                               单点 ≤2 跨配额累计截断 / 难度不足放宽邻档 / 缺口不乱补
 #
-# 【关于"abnormal 降权 50%"的实现说明（PRD 5.3 的原文，这里落成确定性规则）】
-#   PRD 说异常题"降权 50%"。抽题是确定性排序，"50% 概率被选中"这种随机语义没法复现，
-#   所以落成等价规则：同难度档内 abnormal 一律排到所有 normal 之后（沉底）。
+# 【关于"abnormal 降权 50%"的实现说明，这里落成确定性规则】:
+#   同难度档内 abnormal 一律排到所有 normal 之后（沉底）。
 #   效果：池子够 → normal 先走光，abnormal 一道进不来（等于权重砍到 0 附近）；
 #        池子不够 → abnormal 顶上兜底（等于仍保留权重）。
-#   好处：完全可复现、可单测（tests/test_selection_engine.py::test_abnormal_sinks_below_normal）。
+
 from sqlalchemy import select
 
 
@@ -174,6 +173,7 @@ def fetch_candidates_by_kp(kp_ids: list[str]) -> dict[str, list[dict]]:
             "chapter_id": chapter_id,
         })
     return grouped
+
 
 
 # =====================================================================

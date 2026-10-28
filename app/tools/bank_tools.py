@@ -1,16 +1,13 @@
-# app/tools/bank_tools.py
-# M4-T1 · 题库侧共享 Tool：题库检索 + 配额抽题的 tool 壳。
-#
-# 【壳与芯的分工，这条边界是本文件最要紧的设计】
-#   select_questions_by_quota_tool（工具，返回 JSON 字符串）
-#        ↑ 只做三件事：解析入参、调引擎、把结果转 JSON 字符串
-#   select_questions_by_quota      （引擎，纯函数，在 app/services/selection_engine.py）
-#        ↑ 真正决定"选哪几道题"的规则全在这儿，同一输入必然同一输出
-#
-#   为什么非要拆开：
-#     ① 芯是纯函数 → 单测直接打，不需要 DB / LLM / CrewAI（tests/test_selection_engine.py 就是这么测的）；
-#     ② 壳只是适配层 → 换框架只改壳，规则一行不动；
-#     ③ exam_crew 的选题执行器直接调芯（跳过壳），少一次 JSON 往返，也少一次 LLM 插手的机会。
+"""
+M4-T1 · 题库侧共享 Tool：题库检索 + 配额抽题的 tool 壳。
+
+【壳与芯的分工，这条边界是本文件最要紧的设计】
+  select_questions_by_quota_tool（工具，返回 JSON 字符串）
+       ↑ 只做三件事：解析入参、调引擎、把结果转 JSON 字符串
+  select_questions_by_quota      （引擎，纯函数，在 app/services/selection_engine.py）
+       ↑ 真正决定"选哪几道题"的规则全在这儿，同一输入必然同一输出
+"""
+
 import json
 
 from langchain_core.tools import tool

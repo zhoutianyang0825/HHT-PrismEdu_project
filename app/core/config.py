@@ -82,6 +82,17 @@ class Settings(BaseSettings):
     langfuse_secret_key: str = ""                  # 形如 sk-lf-...
     langfuse_host: str = "http://localhost:3100"   # 搬内网后改成 http://<服务器IP>:3100
 
+    # ---- 使用周报（监控第一层的定时推送，APScheduler 内置）----
+    #   四项 SMTP 任一留空 = 周报定时任务整体不启动（插销式，与观测层同一原则）
+    #   授权码与 Kuma 通知里配的是同一套（邮箱后台开 SMTP 领的 16 位码）
+    report_email_host: str = ""                    # 如 smtp.qq.com / smtp.163.com
+    report_email_port: int = 465                   # 465=SSL（QQ/163 默认）；587=STARTTLS
+    report_email_user: str = ""                    # 发件邮箱，如 xxxx@qq.com
+    report_email_password: str = ""                # SMTP 授权码，不是邮箱登录密码
+    report_email_to: str = ""                      # 收件邮箱，多个用逗号分隔
+    report_day_of_week: str = "mon"                # cron：周几（mon/tue/... 或 0-6）
+    report_hour: int = 8                           # 几点发（本地时区 Asia/Shanghai）
+
 
     
 

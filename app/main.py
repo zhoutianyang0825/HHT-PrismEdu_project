@@ -35,15 +35,27 @@ async def lifespan(app: FastAPI):
         get_store()          # 内部 setup()：store 表
         print("[startup] checkpointer / store 预热完成（PG 内部表就绪）")
 
-    except Exception as exc:   
+    except Exception as exc:
         # PG 没起也允许服务先起来（auth/admin 不依赖 checkpointer），
         # 学生端第一次用时会再试——报错信息直指容器，不吞
         print(f"[startup] ⚠️ 预热失败（PG 未就绪？）：{exc}\n"
               "          学生端/老师端批改接口在 PG 可用后自动恢复")
 
+    # 使用周报的定时调度（SMTP 未配置时内部直接跳过，插销式）
+    from app.core.usage_scheduler import start_report_scheduler
+    start_report_scheduler()
+
     yield   # ← 服务运行中
 
-    # 退出：关 PG 连接池（checkpointer/store 各一个）
+    # 退出：先停定时调度线程
+    try:
+        from app.core.usage_scheduler import shutdown_report_scheduler
+        shutdown_report_scheduler()
+
+    except Exception:
+        pass
+    
+    # 再关 PG 连接池
     try:
         from app.db.checkpointer import close_checkpointer
         close_checkpointer()

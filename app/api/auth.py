@@ -22,6 +22,7 @@ M5-T1 · 登录端点：用户名密码 → 多角色 JWT（roles: [...] 数组�
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -79,50 +80,45 @@ def _log_attempt(db: Session, request: Request, username: str,
     db.commit()
 
 
-@router.post("/login")
-def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
-    """登录：成功返回 JWT；失败按锁定/停用/密码错三种原因分别响应。
+def _authenticate(db: Session, request: Request, username: str, password: str) -> dict:
+    """登录核心流程：账户锁定检查 → 查人 → 验密 → 拼角色 → 签发。两个登录端点共用。
 
-    每个出口都写 login_logs 一行（t2 前后共四个出口），使用监控与安全监控共用这张表。
+    得到的数据：用户名明文 + 密码明文（来自 JSON body 或 OAuth2 form）
+    要做的操作：t2~t6 完整链路，每个出口写一行 login_logs
+    返回：成功 → 含 access_token 的完整响应体 dict；失败 → 抛对应 HTTPException
+    为什么抽出来：/login 收 JSON（前端用），/token 收 form（Swagger Authorize 用），
+    两边的"格式壳"不同但核心流程必须逐字一致——抽一处，防止双份实现漂移。
     """
-
     # ---- t2 锁定检查：被锁的账号连"试密码"的机会都不给（防爆破）----
-    if is_locked(body.username):
-        _log_attempt(db, request, body.username, "locked")
+    if is_locked(username):
+        _log_attempt(db, request, username, "locked")
         raise HTTPException(
             status.HTTP_423_LOCKED,
             detail="账号已锁定（连续失败 5 次），15 分钟后自动解锁",
         )
 
-
     # ---- t3 查人 ----
     user = db.execute(
-        select(User).where(User.username == body.username)
+        select(User).where(User.username == username)
     ).scalar_one_or_none()
 
-
     # ---- t4 密码比对 ----
-    if user is None or not verify_password(body.password, user.password_hash):
-        register_failed_login(body.username)   # 记一笔失败（滑动窗口内第 5 次触发锁定）
-        
-        _log_attempt(db, request, body.username, "bad_password",
+    if user is None or not verify_password(password, user.password_hash):
+        register_failed_login(username)   # 记一笔失败（滑动窗口内第 5 次触发锁定）
+        _log_attempt(db, request, username, "bad_password",
                      user_id=user.id if user else None)
-        
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
-
 
     if not user.is_active:
         # 停用账号：密码对也 401。注意不记失败次数——它不是爆破，是权限问题
-        _log_attempt(db, request, body.username, "inactive", user_id=user.id)
+        _log_attempt(db, request, username, "inactive", user_id=user.id)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="账号已停用，请联系管理员")
-
 
     # ---- t5 拼角色。roles 为空 = 数据异常，直接报错而不是发一个处处 403 的 token ----
     roles = _load_roles(db, user.id)
     if not roles:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail=f"用户 {user.username} 没有任何角色，请管理员先补 user_roles")
-
 
     # 学生档案 id：学生端业务全用它（students.id），登录时顺手查掉
     student_id = None
@@ -132,11 +128,10 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         ).scalar_one_or_none()
         student_id = profile   # 没建档案就是 None，前端提示找管理员补 students 行
 
-
     # ---- t6 签发 + 清空失败记录计数 + LoginLog 表留痕 ----
-    clear_failures(body.username)
+    clear_failures(username)
     token = create_access_token(user_id=user.id, username=user.username, roles=roles)
-    _log_attempt(db, request, body.username, "success", user_id=user.id)
+    _log_attempt(db, request, username, "success", user_id=user.id)
 
     return {
         "access_token": token,
@@ -147,6 +142,33 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         "roles": roles,
         "student_id": student_id,
     }
+
+
+# api接口层：
+@router.post("/login")
+def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+    """登录（JSON 版）：供前端 web_app 用。成功返回 JWT；失败按原因分别响应。
+
+    每个出口都写 login_logs 一行，使用监控与安全监控共用这张表。
+    """
+    return _authenticate(db, request, body.username, body.password)
+
+
+@router.post("/token", summary="登录（OAuth2 form 版，供 /docs 的 Authorize 按钮用）")
+def token(request: Request, form: OAuth2PasswordRequestForm = Depends(),
+          db: Session = Depends(get_db)):
+    """登录（form 版）：收 application/x-www-form-urlencoded，专供 /docs 的 Authorize。
+
+    得到的数据：Swagger UI Authorize 弹窗提交的 username + password 表单字段
+    要做的操作：复用 _authenticate 全流程（含 login_logs 留痕），只取 token 字段
+    返回：标准 OAuth2 响应 {access_token, token_type}——Swagger 只认这个结构
+
+    为什么必须单独有它：Swagger 的 Authorize 表单按 OAuth2 规范发 form 数据，
+    而前端 /login 收 JSON——格式壳不同，强行兼容会把主端点签名弄脏；
+    独立一个端点各走各的壳，核心逻辑共用 _authenticate 不漂移。
+    """
+    out = _authenticate(db, request, form.username, form.password)
+    return {"access_token": out["access_token"], "token_type": out["token_type"]}
 
 
 @router.get("/me")

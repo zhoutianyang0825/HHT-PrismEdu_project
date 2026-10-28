@@ -43,6 +43,8 @@ dependencies = [
     "pypdf>=6.21.2",
     "fonttools>=4.67.0",
     "pypdfium2>=5.14.0",
+    "python-multipart>=0.0.32",
+    "apscheduler>=3.10,<4",
 ]
 
 [dependency-groups]

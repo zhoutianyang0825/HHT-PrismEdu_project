@@ -23,7 +23,7 @@ from app.db.session import get_db
 #   看到请求头 Authorization: Bearer eyJhbGci... → 抽出 eyJhbGci... 
 #   头里没 token → 直接回 401，后面的代码根本不执行
 # tokenUrl 只是 OpenAPI 文档里"去哪换 token"的展示信息，不影响运行逻辑
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 
 class CurrentUser:

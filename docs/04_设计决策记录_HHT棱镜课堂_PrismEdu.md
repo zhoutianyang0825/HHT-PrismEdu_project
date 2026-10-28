@@ -169,8 +169,11 @@
   1. **业务行为层（自研，零新服务）**：`login_logs` 表（成功行 = 使用监控，失败行 = 安全监控，login 的 locked/bad_password/inactive/success 四个出口全留痕；user_id 裸 Integer 不带 FK，账号删了日志留存，同 audit_logs 设计）+ `GET /api/admin/usage/summary` 聚合端点。全查现成业务表**不埋点**——student_answers 四种来源（homework/quiz/exam/chat）共用一张表是架构红利，监控只是换个视角读同一批数据。
   2. **Agent 链路层（Langfuse v2 自托管）**：8 个调用点统一走 `observability.build_callbacks()` 注入（student 5 + teacher 3），CrewAI 走 litellm 钩子。按 user_id（登录名）/ session_id（user_{账号id}）/ trace_name（student_chat / student_resume / quiz_generate / grading）三维归属；UI 里节点耗时瀑布、token 消耗、interrupt 挂起恢复全程可见。容器：langfuse + langfuse-db 双容器（host 3100），独立库不碰业务 PG。
   3. **系统层（Uptime-Kuma 单容器，host 3001）**：6 个服务探活（后端 /health + PG/Neo4j/Milvus/Redis/Langfuse 的 TCP 口），红点 + 邮件/企业微信 webhook 通知。后端是宿主机进程，容器内探活必须用 `host.docker.internal:8100`。
+  
 - **为什么 Langfuse 选 v2 而不是 v3**：v3 服务端要 clickhouse + minio + worker + redis 四件套，单机 16GB 且已有 5 个容器的环境太重；v2 单容器 + 独立 PG 够用。**代价与已知升级路径**：v2 SDK 的集成代码只认 langchain 0.x，必须显式装 `langfuse-langchain` 2.60.x（唯一带 langchain v1 分支的实现）；将来升 v3 = 服务端换架构 + SDK 换 metadata 归属方式（`langfuse_user_id` 等键），属已知升级成本。
+
 - **为什么观测代码做成"插销式"**：唯一入口 `app/core/observability.py`——keys 未配 / 包缺失 / handler 构造失败三条降级路径**都返回空列表**（空列表与无 callbacks 对 LangChain 完全等价），业务请求零感知。原则与 D11-b 相同：**观测归观测，业务归业务，监控组件故障绝不拖垮主链路**。
+
 - **统计口径（对齐 commit_grade 的定型规则）**：AI 采纳率 = grader_type=llm 且 confirmed ÷ (llm confirmed + grader_type=teacher)，rule 是客观直判不算采纳场景；正确率分母排除 is_correct NULL（未批完 ≠ 错）。
 - **踩过的坑（三条都是实跑踩出来的）**：
   1. Langfuse 服务端 `ENCRYPTION_KEY` 必须是 **64 位 hex**（`openssl rand -hex 32`），给成 base64 直接整站 500，且报错 `Invalid environment variables` 不指明字段——要读 v2 分支 `web/src/env.mjs` 的 zod 校验逐项对照。

@@ -709,20 +709,30 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
     得到的数据：paper_id + body.answers（逐题 content 与手写图地址）
 
     要做的操作：
-      t1 守卫：自己 + 卷子存在 + 卷子推给了自己的班 + 没交过（重复提交 409）
+      t1 守卫：自己 + 卷子存在 + 卷子推给了自己的班 + 没交过（重复提交报 409）
+      t1.5 先占坑建 exam_attempts（0 分占位）——unique(paper,student) 在判分前生效，
+         并发的重复提交在这里被拦成 409，而不是等判分跑完才拦
       t2 save_exam_answers：一个事务写 student_answers（source_type='exam'），
          漏答的客观题补空作答（漏答≠未判分，必须判 0 分）
       t3 客观题逐题跑批改图 → 规则直判 → 写 grading_records + BKT + 错题本
+         （错题走 LLM 归因错因，所以这步是整卷耗时大头）
       t4 主观题不跑图：只留 is_correct=NULL，等老师在待批改里按题批
-      t5 建 exam_attempts：客观题得分先落，主观题批完由老师端点回写
+      t5 回填 exam_attempts：占坑时是 0 分，这里补客观题得分与最终状态
+         （还有主观题待批 → submitted；纯客观卷 → graded；主观分老师批完由端点回写）
       t6 返回逐题结果，前端据此在考试记录里显示对错
 
+      
     返回：
-        {"paper_id": 3, "objective_score": 42.5, "full_score": 100.0,
+        {
+         "paper_id": 3, 
+         "objective_score": 42.5, 
+         "full_score": 100.0,
          "pending_subjective": 3,
          "attempt": {"id": 12, "status": "submitted", ...},
-         "results": [{"question_id": 7, "is_correct": true, "score": 2.5}, ...]}
+         "results": [{"question_id": 7, "is_correct": true, "score": 2.5}, ...]
+        }
 
+         
     为什么客观题不用前端算：
         答案在服务端，前端拿不到（脱敏），只能后端判。
         也没走"前端提交答案 → 后端比对"的轻量路子，为的是复用批改图里
@@ -807,7 +817,7 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
     missed = 0
     try:
         for qid, qtype in paper_rows:
-            if qtype == "subjective":
+            if qtype == "subjective": # 主观题跳过
                 continue
 
             aid = answer_ids.get(qid)

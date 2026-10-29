@@ -753,15 +753,40 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
     if dup is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="这份试卷你已经交过了")
 
+    # ---- t1.5 先占坑再判分（防并发重复判分）----
+    #   ★ 重复提交守卫真正生效的一刻必须在这里：原来 attempt 要等全部判分完才建，
+    #     判分窗口（错题走 LLM 归因，整卷可拖到一分钟）内第二次提交能通过上面的
+    #     dup 检查 → 整卷判分跑两遍、BKT 双更新（实际踩过：弹窗慢用户连点确认）。
+    #     先建 attempt 让 unique(paper, student) 此刻生效，并发第二请求直接 409。
+    #   占坑提交后若判分中途炸掉，catch 里删掉占坑行，学生还能重试。
+    full_score = float(db.execute(
+        select(func.coalesce(func.sum(ExamPaperQuestion.score), 0))
+        .where(ExamPaperQuestion.paper_id == paper.id)
+    ).scalar_one()) or paper_total_score(paper)
+
+    try:
+        attempt = create_attempt(db, paper, profile, 0.0, full_score, 1)   # 占位 0 分，status 先 submitted
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
     # ---- t2 落作答 ----
     try:
         answer_ids = save_exam_answers(db, paper, profile, body.answers)
         db.commit()
     except Exception:
         db.rollback()
+        db.delete(db.get(ExamAttempt, attempt.id))
+        db.commit()          # 判分还没开始，删占坑行让学生可以重试
         raise
 
     if not answer_ids:
+        db.delete(db.get(ExamAttempt, attempt.id))
+        db.commit()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="作答与卷面题目对不上，请重新打开试卷")
 
@@ -780,50 +805,49 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
     results: list[dict] = []
     objective_score = 0.0
     missed = 0
-    for qid, qtype in paper_rows:
-        if qtype == "subjective":
-            continue
+    try:
+        for qid, qtype in paper_rows:
+            if qtype == "subjective":
+                continue
 
-        aid = answer_ids.get(qid)
-        if aid is None:
-            # 兜底补行理论上不会走：save_exam_answers 会把漏答的客观题补一行空作答。
-            # 真走到这里说明那一步出了岔子，跳过但记账，最后由 exam_detail 自愈。
-            missed += 1
-            continue
+            aid = answer_ids.get(qid)
+            if aid is None:
+                # 兜底补行理论上不会走：save_exam_answers 会把漏答的客观题补一行空作答。
+                # 真走到这里说明那一步出了岔子，跳过但记账，最后由 exam_detail 自愈。
+                missed += 1
+                continue
 
-        cfg = {"configurable": {"thread_id": f"grading_{aid}"}}
-        cfg["callbacks"] = build_callbacks(
-            user_id=user.username, session_id=f"user_{user.id}",
-            trace_name="grading", tags=["student"],
-            metadata={"answer_id": aid, "trigger": "exam_submit"},
-        )
-        out = graph.invoke({"answer_id": aid, "teacher_user_id": user.id}, cfg)
-        score = float(out.get("final_score") or 0)
-        objective_score += score
-        results.append({
-            "question_id": qid, "answer_id": aid,
-            "status": out.get("status", "confirmed"),
-            "is_correct": out.get("is_correct"), "score": score,
-        })
+            cfg = {"configurable": {"thread_id": f"grading_{aid}"}}
+            cfg["callbacks"] = build_callbacks(
+                user_id=user.username, session_id=f"user_{user.id}",
+                trace_name="grading", tags=["student"],
+                metadata={"answer_id": aid, "trigger": "exam_submit"},
+            )
+            out = graph.invoke({"answer_id": aid, "teacher_user_id": user.id}, cfg)
+            score = float(out.get("final_score") or 0)
+            objective_score += score
+            results.append({
+                "question_id": qid, "answer_id": aid,
+                "status": out.get("status", "confirmed"),
+                "is_correct": out.get("is_correct"), "score": score,
+            })
+    except Exception:
+        # 判分中途炸掉：作答行已 commit（部分判分也是真实成绩），但占坑 attempt
+        # 还是 0 分占位——删掉它让学生能重试交卷（重试时作答幂等，判分从头来）
+        db.rollback()
+        db.delete(db.get(ExamAttempt, attempt.id))
+        db.commit()
+        raise
 
-    # 待批 = 卷面主观题里"学生真的答了"的那几道（没作答的不该进老师队列）
+    # ---- t5 回填考试记录（占坑时已建，这里只补分数与最终状态）----
     pending_subjective = sum(
         1 for qid, qtype in paper_rows if qtype == "subjective" and qid in answer_ids
     )
-
-    # ---- t5 建考试记录 ----
-    full_score = float(db.execute(
-        select(func.coalesce(func.sum(ExamPaperQuestion.score), 0))
-        .where(ExamPaperQuestion.paper_id == paper.id)
-    ).scalar_one()) or paper_total_score(paper)
-
+    attempt.objective_score = round(objective_score, 1)
+    attempt.total_score = round(objective_score, 1)
+    attempt.status = "submitted" if pending_subjective else "graded"
     try:
-        attempt = create_attempt(db, paper, profile, objective_score, full_score,
-                                 pending_subjective)
         db.commit()
-    except ValueError as exc:
-        db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc))
     except Exception:
         db.rollback()
         raise

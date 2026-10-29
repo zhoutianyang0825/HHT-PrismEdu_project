@@ -307,6 +307,7 @@ def student_papers(db: Session, student: Student) -> list[dict]:
     ).all()
     pending = {sid: int(n) for sid, n in pending_rows}
 
+    # 组装返回
     out = []
     for p in paper_rows:
         a = attempts.get(p.id)
@@ -649,10 +650,10 @@ def recalc_attempt(db: Session, paper_id: int, student_id: int) -> ExamAttempt |
 
 
 # =====================================================================
-# 老师端：卷列表 / 按题分组批改
+# 老师端：试卷列表 / 按题分组聚合学生的作答再批改
 # =====================================================================
 def teacher_papers(db: Session, class_ids: list[int] | None, subject: str | None = None) -> list[dict]:
-    """我教的班里已推送的试卷 + 交卷/待批改统计。
+    """任教的班里已推送的试卷 + 交卷/待批改统计，页面左侧提纲。
 
     得到的数据：class_ids（detail 通道班级；None = admin 不限）、subject（可选过滤）
 
@@ -687,18 +688,29 @@ def teacher_papers(db: Session, class_ids: list[int] | None, subject: str | None
 
     paper_ids = [p.id for p in papers]
 
-    # 本次可见范围内被推送的班级（admin 不限 = 全部推送班）
-    pc_rows = db.execute(
+    # 本次可见范围内被推送的班级（admin 不限 = 全部推送班）。
+    #   ★ 这里必须再按 class_ids 过滤一次：top 的 exists() 只回答"这卷和我有交集"，
+    #     统计数字必须只算"我可见的那部分班"，否则会出现
+    #     "左栏徽标待批 1（别人班的作答），点进去组内全是 0"的口径分裂——
+    #     group_grading 是按可见班级过滤的，两边必须同口径。
+    pc_stmt = (
         select(ExamPaperClass.paper_id, Class.id, Class.grade, Class.name)
         .join(Class, Class.id == ExamPaperClass.class_id)
         .where(ExamPaperClass.paper_id.in_(paper_ids))
-    ).all()
+    )
+    if class_ids is not None:
+        pc_stmt = pc_stmt.where(ExamPaperClass.class_id.in_(class_ids))
+
+    # 查推送班级明细  
+    pc_rows = db.execute(pc_stmt).all()
+
     classes_of: dict[int, list[str]] = {}
     class_ids_of: dict[int, list[int]] = {}
     for pid, cid, grade, name in pc_rows:
         classes_of.setdefault(pid, []).append(f"{grade}{name}")
         class_ids_of.setdefault(pid, []).append(cid)
 
+    # 查卷面题数    
     qcount = {
         pid: int(n) for pid, n in db.execute(
             select(ExamPaperQuestion.paper_id, func.count())
@@ -707,23 +719,42 @@ def teacher_papers(db: Session, class_ids: list[int] | None, subject: str | None
         ).all()
     }
 
+    # 已交人数：attempt 挂学生，学生挂班级——同样只统计我可见班级里的
+    submitted_stmt = (
+        select(ExamAttempt.paper_id, func.count())
+        .join(Student, Student.id == ExamAttempt.student_id)
+        .where(ExamAttempt.paper_id.in_(paper_ids))
+        .group_by(ExamAttempt.paper_id)
+    )
+
+    # 按 class_ids 再过滤非任教班级
+    if class_ids is not None:
+        submitted_stmt = submitted_stmt.where(Student.class_id.in_(class_ids))
+
     submitted = {
-        pid: int(n) for pid, n in db.execute(
-            select(ExamAttempt.paper_id, func.count())
-            .where(ExamAttempt.paper_id.in_(paper_ids))
-            .group_by(ExamAttempt.paper_id)
-        ).all()
+        pid: int(n) for pid, n in db.execute(submitted_stmt).all()
     }
 
-    pending_rows = db.execute(
+    # 待批条数：与 group_grading 同口径：
+    # 来源类型= exam  + 主观题subjective + is_correct 为空 + 学生在我可见班级里。
+    # 少一个条件就是幽灵待批的来源。
+    pending_stmt = (
         select(StudentAnswer.source_id, func.count())
         .join(Question, Question.id == StudentAnswer.question_id)
+        .join(Student, Student.id == StudentAnswer.student_id)
         .where(StudentAnswer.source_type == "exam")
         .where(StudentAnswer.source_id.in_(paper_ids))
         .where(StudentAnswer.is_correct.is_(None))
         .where(Question.question_type == "subjective")
         .group_by(StudentAnswer.source_id)
-    ).all()
+    )
+
+    # 按 class_ids 再过滤非任教班级
+    if class_ids is not None:
+        pending_stmt = pending_stmt.where(Student.class_id.in_(class_ids))  
+
+    # 查待批改条数
+    pending_rows = db.execute(pending_stmt).all()
     pending = {pid: int(n) for pid, n in pending_rows}
 
     student_count: dict[int, int] = {}
@@ -749,7 +780,7 @@ def teacher_papers(db: Session, class_ids: list[int] | None, subject: str | None
 
 def group_grading(db: Session, paper: ExamPaper,
                   class_ids: list[int] | None = None) -> dict:
-    """按题目分组的主观题作答（老师批改页的主视图）。
+    """按 题目分组的 所有学生的主观题作答（老师批改页右侧，具体待批改题目细节）。
 
     得到的数据：paper、class_ids（老师可见班；None = 不限）
 

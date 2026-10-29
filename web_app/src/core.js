@@ -455,7 +455,9 @@ export function modal({ title, sub, body, actions = [], onMount }) {
     btn.textContent = a.label;
     btn.onclick = async () => {
       if (a.onClick) {
-        const keep = await a.onClick({ close: closeModal });
+        // 把弹窗按钮自己传给 onClick：调用方可以做忙碌态/禁点，
+        // 否则慢请求期间弹窗按钮看起来"没反应"，用户会连点（考试交卷踩过）
+        const keep = await a.onClick({ close: closeModal, btn });
         if (keep === false) return;
       }
       if (a.keepOpen !== true) closeModal();
@@ -487,9 +489,11 @@ export function busy(btn, text = "处理中…") {
   if (!btn) return () => {};
   const html = btn.innerHTML;
   btn.classList.add("is-busy");
+  btn.disabled = true;                       // 忙碌期禁点：慢请求时用户连点会触发重复提交
   btn.innerHTML = `<span class="spin"></span>${esc(text)}`;
   return () => {
     btn.classList.remove("is-busy");
+    btn.disabled = false;
     btn.innerHTML = html;
   };
 }

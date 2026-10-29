@@ -1229,6 +1229,7 @@ async function submitExam(view, ctx) {
       requestAnimationFrame(() => {
         view.querySelector("#exam-result")?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
+      // 成功路径不 restore：弹窗按钮随 closeModal 销毁、页面按钮随 openExam 重渲染换新
     } catch (err) {
       restore();
       toast(err.detail || "交卷失败", "err");
@@ -1246,8 +1247,10 @@ async function submitExam(view, ctx) {
     body: `<div style="font-size:14px;line-height:1.85">${tip}</div>`,
     actions: [
       { label: "再检查一遍" },
-      { label: missing.length ? "仍要交卷" : "确认交卷", kind: "primary", onClick: () => go(
-        view.querySelector("#exam-submit-2") || view.querySelector("#exam-submit")) },
+      // 收下 modal 传来的弹窗按钮：忙碌态显示在弹窗上（原来打在页面底部按钮上，
+      // 被弹窗遮住看不见 → 用户以为没反应连点 → 两次并发提交整卷判分跑两遍）
+      { label: missing.length ? "仍要交卷" : "确认交卷", kind: "primary",
+        onClick: ({ btn }) => go(btn) },
     ],
   });
 }

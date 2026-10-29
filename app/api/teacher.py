@@ -763,8 +763,6 @@ def exam_papers(user: CurrentUser = Depends(get_current_user),
           "student_count": 39, "submitted_count": 31, "pending_count": 7}]
 
     为什么老师端要按"卷"而不是按"作答"列：
-        待批改页原本是一条条作答流水（谁、哪题、什么时候交），
-        老师拿到的是一堆散点，无法回答"这份卷我还剩几题没批"。
         试卷维度才有"批改进度"，题维度才有"同一题横向对比"。
     """
     from app.services.exam_delivery import teacher_papers
@@ -777,7 +775,7 @@ def exam_grading_groups(paper_id: int,
                         user: CurrentUser = Depends(get_current_user),
                         scopes: list[dict] = Depends(get_scopes),
                         db: Session = Depends(get_db)):
-    """按题目分组的主观题作答（老师批改主视图）。
+    """按 题目分组的 主观题作答（老师批改主视图）。
 
     得到的数据：paper_id
 

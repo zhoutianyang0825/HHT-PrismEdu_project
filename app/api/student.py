@@ -759,16 +759,13 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
         select(ExamAttempt.id)
         .where(ExamAttempt.paper_id == paper.id)
         .where(ExamAttempt.student_id == profile.id)
-    ).scalar_one_or_none()
+    ).scalar_one_or_none() # 取值，0行返回None，1行返回1，超过1直接报错
     if dup is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="这份试卷你已经交过了")
 
     # ---- t1.5 先占坑再判分（防并发重复判分）----
-    #   ★ 重复提交守卫真正生效的一刻必须在这里：原来 attempt 要等全部判分完才建，
-    #     判分窗口（错题走 LLM 归因，整卷可拖到一分钟）内第二次提交能通过上面的
-    #     dup 检查 → 整卷判分跑两遍、BKT 双更新（实际踩过：弹窗慢用户连点确认）。
-    #     先建 attempt 让 unique(paper, student) 此刻生效，并发第二请求直接 409。
-    #   占坑提交后若判分中途炸掉，catch 里删掉占坑行，学生还能重试。
+    #    1. dup 检查 → 整卷判分跑两遍、BKT 双更新（实际踩过：弹窗慢用户连点2次确认）。
+    #    2. 先建 attempt 让 unique(paper, student) paper和student双列组合的值，只能有一个，并发第二个请求出现第二个组合值，直接 409。
     full_score = float(db.execute(
         select(func.coalesce(func.sum(ExamPaperQuestion.score), 0))
         .where(ExamPaperQuestion.paper_id == paper.id)
@@ -785,6 +782,7 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
         raise
 
     # ---- t2 落作答 ----
+    #    3. 占坑提交后若判分中途炸掉，catch 里删掉占坑行，学生还能重试。
     try:
         answer_ids = save_exam_answers(db, paper, profile, body.answers)
         db.commit()
@@ -799,6 +797,7 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
         db.commit()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="作答与卷面题目对不上，请重新打开试卷")
+
 
     # ---- t3 客观题判分（主观题跳过：留给老师）----
     # 数据源用"卷面全部题目"，不是 answer_ids —— 学生漏答的客观题也必须判 0，
@@ -817,7 +816,7 @@ def exam_submit(paper_id: int, body: ExamSubmitIn,
     missed = 0
     try:
         for qid, qtype in paper_rows:
-            if qtype == "subjective": # 主观题跳过
+            if qtype == "subjective":  # 主观题跳过
                 continue
 
             aid = answer_ids.get(qid)
